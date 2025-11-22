@@ -1,0 +1,24 @@
+already implmented a few features in older version of notebook:
+https://www.kaggle.com/code/nicholeasuniquename/recommender-systems?scriptVersionId=241338276
+
+Class card:
+
+===============================
+Retrieval
+------------------------------
+query_model
+candidate_model
+query_indexer
+candidate_indexer
+user_bloom_filter
+is_linux
+------------------------------
+init(trained_model, movies, users)
+get_movies_given_user(users, top_k)
+get_users_given_user(users, top_k)
+get_movies_given_movie(movies, top_k)
+get_users_given_movie(movies, top_k)
+is_user_known(user_id)
+get_cold_start_rankings(top_k)
+get_predictions(users)
+==================================

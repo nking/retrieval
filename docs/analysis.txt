@@ -1,0 +1,25 @@
+Depends upon the saved_model created from
+https://github.com/nking/recommender_systems.git
+
+requires python >= 3.10
+
+will use Scann or Faiss vector search library, depending upon the OS.
+if linux OS: ScaNN or Faiss
+else: Faiss
+
+ScaNN dependencies:
+  - python>=3.9
+  - if x86: AVX, FMA instruction set support
+  - if ARM: NEON instruction set support
+  - if linux: libstdc++ version >= 3.4.23  
+
+FAISS dependences:
+  - 
+bloom filter:  
+  rbloom
+
+weighted bayesian average:
+  - to be implemented
+
+
+

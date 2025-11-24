@@ -16,7 +16,8 @@ class DensityGenerator:
   all points are performed to reposition the points to either the highest probability cluster
   or to a new cluster.
   
-  see also  the predictive distribution of
+  Gemini.google.com was used to help characterize this class.
+  for math details, see the predictive distribution of
   the Dirichlet Process as a Bayesian model
   (eqn 10, Teh, Y.W., 2017. Dirichlet process. In Encyclopedia of machine learning and data mining (pp. 361-370). Springer, Boston, MA.
   Teh YW. Dirichlet process. InEncyclopedia of machine learning and data mining 2017 (pp. 361-370). Springer, Boston, MA.)

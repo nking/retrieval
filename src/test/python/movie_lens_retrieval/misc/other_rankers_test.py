@@ -36,6 +36,13 @@ class BayesianAvgTest(unittest.TestCase):
     s2 = wilson_score(95, 100)
     self.assertLess(s1, s2)
   
+  def test_thomspon(self):
+    df = pd.DataFrame(self.data)
+    df_ranked = thompson_sampling_with_dirichlet_prior(df, seed=None)
+    print(df_ranked)
+    df_ranked = thompson_sampling_with_dirichlet_prior(df, seed=None)
+    print(df_ranked)
+    
     
 if __name__ == '__main__':
   unittest.main()

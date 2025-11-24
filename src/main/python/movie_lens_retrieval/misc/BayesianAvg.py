@@ -52,7 +52,26 @@ class BayesianShrinkageEstimator:
     unweighted Average: Unbiased, but Massive Variance (scores jump wildly).
     Bayesian Estimate: Slightly Biased (towards the mean), but Low Variance (scores are stable).
   """
-  def __init__(self, data: Union[pl.DataFrame, pd.DataFrame], m=20):
+  def __init__(self, data: Union[pl.DataFrame, pd.DataFrame], prior_rating_column_name:str=None):
+    """
+    
+    :param data: dataframe with columns "1", "2", "3", "4", "5" for the total counts of each rating category
+    where each row is for a single movie.
+       e.g.
+        df = pl.DataFrame({
+          'title': ['popular', 'high_but_few_ratings', 'loved_and_hated', 'hated', 'new_unrated'],
+          'movie_id': [1, 2, 3, 4, 5],
+          '1': [500,   2,  4000, 800, 0],
+          '2': [100,   1,  1000, 100, 0],
+          '3': [200,   0,  500,   50, 0],
+          '4': [3000,  5,  1000,  20, 0],
+          '5': [8000, 40,  4000,  10, 1]
+        })
+    :param prior_rating_column_name: name of the column that contains the prior rating if any.
+    This is used for predictions from a metadata model, such as predicting the rating from only the
+    genres or from director, actors, description etc.  If present this becomes the term "C" discussed in the
+    class docstring.  metdata model prior ratings are used by Spotify, YouTube (Deep Retrieval).
+    """
     if isinstance(data, pl.DataFrame):
       type = "polars"
     elif isinstance(data, pd.DataFrame):
@@ -63,15 +82,21 @@ class BayesianShrinkageEstimator:
     eps = 1E-9
     df = data
     if type == "pandas":
+      #copy to use Laplace Smoothing without modifying original df
+      df = df.copy()
+      df[['1', '2', '3', '4', '5']] = 1 + df[['1', '2', '3', '4', '5']]
       df['total_votes'] = df[['1', '2', '3', '4', '5']].sum(axis=1).astype('float64')
-      df.loc[df['total_votes'] == 0, 'total_votes'] = eps
       df['movie_ratings_mean'] = (
         (df['1'] * 1 + df['2'] * 2 + df['3'] * 3 + df['4'] * 4 + df[
           '5'] * 5) / df['total_votes']
       )
-      C = df['movie_ratings_mean'].mean() #prior
+      
       m = df['total_votes'].quantile(0.75)
-      print(f"C={C}, m={m}")
+      print(f"m={m}")
+      if prior_rating_column_name:
+        C = df[prior_rating_column_name]
+      else:
+        C = df['movie_ratings_mean'].mean()  # prior
       v = df['total_votes']
       R = df['movie_ratings_mean'] #likelihood
       df["weighted_rating"] = (
@@ -79,12 +104,13 @@ class BayesianShrinkageEstimator:
       )
       self.df_sorted = df.sort_values('weighted_rating', ascending=False)
     else:
+      #Lapplace smoothing.  add 1 to counts
       df = df.with_columns(
-        pl.sum_horizontal("1", "2", "3", "4", "5").cast(pl.Float64).alias("total_votes")
+        (pl.col("1") + 1).alias("1"), (pl.col("2") + 1).alias("2"),
+        (pl.col("3") + 1).alias("3"),(pl.col("4") + 1).alias("4"),(pl.col("5") + 1).alias("5"),
       )
       df = df.with_columns(
-        pl.when(pl.col("total_votes") == 0.).then(eps)
-        .otherwise(pl.col("total_votes"))
+        pl.sum_horizontal("1", "2", "3", "4", "5").cast(pl.Float64).alias("total_votes")
       )
       df = df.with_columns(
         ((pl.col('1') * 1 + pl.col('2') * 2 + pl.col('3') * 3 + pl.col('4') * 4 + pl.col('5') * 5)
@@ -113,9 +139,8 @@ class BayesianAvg:
   def __init__(self, data:Union[pl.DataFrame, pd.DataFrame], m=20):
     """
     
-    :param data: polars dataframe in format having columns movie_id, and "1","2","3","4","5"
-    where "1","2","3","4","5" are the numbers of ratings for that movie in that star
-    category.
+    :param data: dataframe with columns "1", "2", "3", "4", "5" for the total counts of each rating category
+    where each row is for a single movie.
        e.g.
         df = pl.DataFrame({
           'title': ['popular', 'high_but_few_ratings', 'loved_and_hated', 'hated', 'new_unrated'],
@@ -137,6 +162,9 @@ class BayesianAvg:
     eps = 1E-9
     df = data
     if type == "pandas":
+      # copy to use Laplace Smoothing without modifying original df
+      df = df.copy()
+      df[['1', '2', '3', '4', '5']] = 1 + df[['1', '2', '3', '4', '5']]
       df['total_votes'] = df[ ['1', '2', '3', '4', '5']].sum(axis=1).astype('float64')
       df.loc[df['total_votes'] == 0, 'total_votes'] = eps
       # Calculate raw arithmetic average.  this==expectation for Normal, Poisson, and Bernoulli
@@ -164,19 +192,18 @@ class BayesianAvg:
       df.drop(columns=['numerator', 'denominator'], inplace=True)
       self.df_sorted = df.sort_values('dirichlet_rating', ascending=False)
     else:
+      # Lapplace smoothing.  add 1 to counts
+      df = df.with_columns(
+        (pl.col("1") + 1).alias("1"), (pl.col("2") + 1).alias("2"),
+        (pl.col("3") + 1).alias("3"), (pl.col("4") + 1).alias("4"),
+        (pl.col("5") + 1).alias("5"),
+      )
       df = df.with_columns(
         pl.sum_horizontal("1", "2", "3", "4", "5").cast(pl.Float64).alias("total_votes")
       )
       df = df.with_columns(
-        pl.when(pl.col("total_votes") == 0.).then(eps)
-        .otherwise(pl.col("total_votes"))
-      )
-      df = df.with_columns(
         ((pl.col('1') * 1 + pl.col('2') * 2 + pl.col('3') * 3 + pl.col('4') * 4 + pl.col('5') * 5)
           / pl.col('total_votes')).alias("likelihood")
-      )
-      df = df.with_columns(
-        (pl.col("likelihood").fill_nan(0.))
       )
       
       global_counts = df.select(pl.sum("1"), pl.sum("2"), pl.sum("3"), pl.sum("4"), pl.sum("5")).select(pl.concat_list(pl.all())).item()

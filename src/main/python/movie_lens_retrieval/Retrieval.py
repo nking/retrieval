@@ -70,9 +70,8 @@ def build_faiss_index(embeddings: np.ndarray, dimension: int):  # , ids: np.ndar
   return index
 
 class Retrieval:
-  def __init__(self, trained_model, \
-               movies,
-               users, k: int = 1000):
+  def __init__(self, user_movie_saved_model_dir:str, metadata_saved_model_dir:str,
+               movies,  users, k: int = 1000):
     pass
   
   def get_movies_given_user(self, users, top_k):

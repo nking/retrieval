@@ -1,6 +1,6 @@
 
 import unittest
-from movie_lens_retrieval.misc.BayesianAvg import BayesianAvg, BayesianShrinkageEstimator
+from movie_lens_retrieval.misc.Bayesian import BayesianAvg, BayesianShrinkageEstimator
 import numpy as np
 import polars as pl
 import plotly.express as px

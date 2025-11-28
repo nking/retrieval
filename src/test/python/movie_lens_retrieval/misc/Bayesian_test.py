@@ -29,7 +29,6 @@ class BayesianAvgTest(unittest.TestCase):
     print(f"\n{t}")
     
   def testWeighted(self):
-    m = 1
     b = BayesianShrinkageEstimator(pd.DataFrame(self.data))
     t = b.get_top(10)
     print(f"{t}")

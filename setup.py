@@ -10,6 +10,8 @@ setup(
     'faiss-cpu; platform_system != "Linux"',
     'scann; platform_system == "Linux"',
     'rbloom',
+    'tensorflow>=2.16.1', 'numpy >= 1.26.4',
+    'pandas>=1.5.3', 'polars>=1.35.2'
   ],
   extras_require={"test": ["pytest"]},
   classifiers=[ 'Natural Language :: English',

@@ -132,8 +132,11 @@ class BayesianShrinkageEstimator:
       )
       self.df_sorted = df.sort('weighted_rating', descending=True)
       
+  def get_top_with_ratings(self, top:int=10):
+    return self.df_sorted['movie_id'].head(top)
+  
   def get_top(self, top:int=10):
-    return self.df_sorted.head(top)
+    return self.df_sorted['movie_id'].head(top).to_list()
   
 class BayesianAvg:
   def __init__(self, data:Union[pl.DataFrame, pd.DataFrame], m=20):
@@ -172,7 +175,7 @@ class BayesianAvg:
         (df['1'] * 1 + df['2'] * 2 + df['3'] * 3 + df['4'] * 4 + df['5'] * 5) / df['total_votes']
       )
       #sum over all movies, the number of a rating category
-      # length of number of ratings categories
+      # length of number of ratings ordinal categories
       global_counts = df[['1', '2', '3', '4', '5']].sum()
       # scalar:
       total_global_votes = global_counts.sum()

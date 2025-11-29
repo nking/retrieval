@@ -3,6 +3,10 @@ from typing import Union
 import polars as pl
 import pandas as pd
 
+from absl import logging
+logging.set_verbosity(logging.INFO)
+logging.set_stderrthreshold(logging.INFO)
+
 """
 Note, Google's Gemini was used to find and supplement information.
 """
@@ -136,6 +140,7 @@ class BayesianShrinkageEstimator:
     return self.df_sorted['movie_id'].head(top)
   
   def get_top(self, top:int=10):
+    logging.info(f'top={self.df_sorted.head(top)}')
     return self.df_sorted['movie_id'].head(top).to_list()
   
 class BayesianAvg:

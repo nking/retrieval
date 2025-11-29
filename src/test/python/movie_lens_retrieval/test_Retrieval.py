@@ -1,5 +1,6 @@
 import sys
 from unittest import TestCase
+import polars as pl
 import tensorflow.saved_model as saved_model
 from movie_lens_retrieval.Retrieval import Retrieval
 from helper import *
@@ -29,7 +30,7 @@ class TestRetrieval(TestCase):
     self.assertTrue("movie_id" in ratings_pl.columns)
     self.assertTrue("rating" in ratings_pl.columns)
   
-  def test__create_embeddings(self):
+  def test_create_embeddings(self):
     #def _create_user_embeddings(inputs: Union[Dict[str, np.ndarray], List[bytes]]) -> np.ndarray:
     file_paths = [os.path.join(get_project_dir(),
       "src/test/resources/data/ratings_sorted_1_joined*parquet"),
@@ -82,18 +83,49 @@ class TestRetrieval(TestCase):
     self.assertTrue(0 in neighbor_idxs[0])
     self.assertTrue(1 in neighbor_idxs[1])
     Retrieval.is_linux = sav
-    
-  def test__create_movie_indexers(self):
-    pass
-  
-  def test__init_rbloom(self):
-    pass
   
   def test__agg_movie_counts(self):
-    pass
+    file_paths = [os.path.join(get_project_dir(),
+      "src/test/resources/data/ratings_sorted_1_joined*parquet")]
+    ratings_pl = Retrieval._read_ratings(file_paths)
+    file_path = os.path.join(get_project_dir(),
+      "src/test/resources/data/movies*parquet")
+    movies_pl = pl.read_parquet(file_path, glob=True)
+    pivoted = Retrieval._agg_movie_counts(ratings_pl, movies_pl)
+    self.assertEqual(len(pivoted.columns), 6)
+    for key in ["movie_id", "1", "2", "3", "4", "5"]:
+      self.assertTrue(key in pivoted.columns)
+    self.assertEqual(movies_pl["movie_id"].count(), pivoted["movie_id"].count())
   
-  def test__prep_cold_start_rankings(self):
-    pass
+    #test one of the cold start rankings
+    max_k = 10
+    ranked = Retrieval._prep_cold_start_rankings(ratings_pl, movies_pl, max_k)
+    self.assertEqual(len(ranked), max_k)
   
+  def test_get_metadata_predictions(self):
+    metadata_saved_model_dir = os.path.join(get_project_dir(),
+      "src/main/resources/serving_models/metadata_model")
+    file_path = os.path.join(get_project_dir(),
+      "src/test/resources/data/movies*parquet")
+    movies_pl = pl.read_parquet(file_path, glob=True)
+    #movie_id, title, genres, predicted_from_genres
+    movies = Retrieval._get_metadata_predictions(metadata_saved_model_dir, movies_pl)
+    self.assertEqual(len(movies), movies_pl["movie_id"].count())
+    self.assertTrue("predicted_from_genres" in movies.columns)
+    self.assertEqual(len(movies.columns), len(movies_pl.columns) + 1)
+    
+    max_k = 10
+    file_paths = [os.path.join(get_project_dir(),
+      "src/test/resources/data/ratings_sorted_1_joined*parquet"),
+      os.path.join(get_project_dir(),
+      "src/test/resources/data/ratings_sorted_2_joined*parquet")]
+    ratings_pl = Retrieval._read_ratings(file_paths)
+    ranked = Retrieval._prep_cold_start_rankings(ratings_pl, movies_pl,
+      max_k, "predicted_from_genres")
+    self.assertEqual(len(ranked), max_k)
+    
+  def test__init_rbloom(self):
+    pass
+ 
   def test_get_cold_start_rankings(self):
     pass

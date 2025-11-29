@@ -60,6 +60,31 @@ class Retrieval:
     self.user_indexers = self._create_user_indexers(examples_list)
     self.movie_indexers = self._create_movie_indexers(examples_list)
    
+  def _get_metadata_predictions(metadata_saved_model_dir:str, movies:pl.DataFrame) -> pl.DataFrame:
+    #the model requires ratings_joined column,
+    # but only useds movie_id and genres as inputs
+    inputs_dict_np = Retrieval._polars_to_numpy_dict(movies)
+    del inputs_dict_np['title']
+    #add fake data for the user_id,timestamp,gender,age,occupation
+    n = len(inputs_dict_np['movie_id'])
+    for key in ["user_id", "age", "occupation"]:
+      inputs_dict_np[key] = np.array([[0] for _ in range(n)])
+    inputs_dict_np['gender'] = np.random.choice(np.array([b'M', b'F']), size=n, replace=True)
+    inputs_dict_np['gender'] = inputs_dict_np['gender'].reshape(-1, 1)
+    inputs_dict_np['timestamp'] = np.array([[966606623] for _ in range(n)])
+    
+    examples_list = convert_dict_inputs_to_tfexample_ser(inputs_dict_np)
+  
+    movie_model = tf.saved_model.load(metadata_saved_model_dir)
+    infer = movie_model.signatures["serving_default"]
+    INPUT_KEY = list(infer.structured_input_signature[1].keys())[0]
+    
+    predicted = infer(**{INPUT_KEY: examples_list})['outputs'].numpy()
+    movies = movies.with_columns(
+      pl.Series(name="predicted_from_genres", values=predicted)
+    )
+    return movies # movie_id, title, genres, predicted_from_genres
+    
   def _create_movie_indexers(inputs: Union[Dict[str, np.ndarray], List[bytes]], _create_user_embeddings, max_k:int) -> np.ndarray:
     """
     note that the indexes are w.r.t the ordering given in ratings_pl
@@ -88,40 +113,15 @@ class Retrieval:
     for row_tuple in ratings.iter_rows():
       um_bf.add(row_tuple[user_idx] << self.shift_bytes + row_tuple[movie_idx])
     return u_bf, um_bf
-  
-  """
-  TODO: use metadata model for the ranking after retrieval
-  def get_movies_given_user(self, users, top_k):
-    #vector search for nearest movies.  use ranking, sort, return top_k
-    pass
-  
-  def get_user_given_user(self, users, top_k):
-    vector search for similar users.  then find similar movies, then use ranking, sort and return top_k
-    pass
-  def get_movies_given_movie(self, movies, top_k):
-    vector search for nearest movies.  use ranking, sort, return top_k
-  def get_user_given_movie(self, movies, top_k):
-    vector search for similar users.  agg their ratings, sort, return top_k
-    pass
-  
-  def is_user_known(self, user_id):
-    return user_id in self.user_bloom_filter
-  
-  def get_predictions(self, ratings: pl.DataFrame, movies:pl.DataFrame):
-    pass
-  """
-  
-  def _agg_movie_counts(self, ratings: pl.DataFrame, movies:pl.DataFrame) -> pl.DataFrame:
+ 
+  def _agg_movie_counts(ratings: pl.DataFrame, movies:pl.DataFrame) -> pl.DataFrame:
     pivoted = ratings.pivot(
-      index="movie_id",
-      columns="rating", values="rating",
-      aggregate_function="count",
+      index="movie_id", columns="rating", values="rating", aggregate_function="count",
     ).fill_null(0).sort("movie_id")
     pivoted = pivoted.with_columns(
       pl.col(name).cast(pl.Int32) for name in
       [name for name in pivoted.columns if name != "movie_id"]
     )
-    
     missing_df = movies.join(pivoted.select(pl.col("movie_id")),
       on="movie_id", how="anti").select(pl.col("movie_id"))
     rating_cols = [col for col in pivoted.columns if col != 'movie_id']
@@ -130,16 +130,17 @@ class Retrieval:
     )
     return pivoted.vstack(missing_df)
   
-  def _prep_cold_start_rankings(self, ratings: pl.DataFrame, movies:pl.DataFrame):
-    pivoted = self._agg_movie_counts(ratings, movies)
-    b = BayesianShrinkageEstimator(ratings)
-    return b.get_top(self.max_k)
+  def _prep_cold_start_rankings(ratings: pl.DataFrame, movies:pl.DataFrame, max_k:int, prior_rating_column_name:str=None):
+    pivoted = Retrieval._agg_movie_counts(ratings, movies)
+    b = BayesianShrinkageEstimator(pivoted, prior_rating_column_name)
+    return b.get_top(max_k)
     
-  def get_cold_start_rankings(self, ratings: pl.DataFrame):
+  def get_cold_start_rankings(self, ratings: pl.DataFrame, movies:pl.DataFrame, max_k:int):
     if self.dynamically_rank:
       #create cold start data for users not in system
-      b = BayesianShrinkageEstimator(ratings)
-      self.cold_start_rankings = b.get_top(self.max_k)
+      pivoted = Retrieval._agg_movie_counts(ratings, movies)
+      b = BayesianShrinkageEstimator(pivoted)
+      self.cold_start_rankings = b.get_top(max_k)
     return self.cold_start_rankings
 
   #@keras.saving.register_keras_serializable(package="",name="build_scann_searcher")

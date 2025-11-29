@@ -103,6 +103,7 @@ class TestRetrieval(TestCase):
     self.assertEqual(len(ranked), max_k)
   
   def test_get_metadata_predictions(self):
+    #for ranking
     metadata_saved_model_dir = os.path.join(get_project_dir(),
       "src/main/resources/serving_models/metadata_model")
     file_path = os.path.join(get_project_dir(),

@@ -47,7 +47,7 @@ class Retrieval:
     
     self.dynamically_rank = dynamically_rank
     self.shift_bytes = 13
-    self.user_bloom_filter, self.user_movie_bloom_filter = self._init_rbloom(ratings_pl)
+    self.user_bloom_filter, self.user_movie_bloom_filter = Retrieval._init_rbloom(ratings_pl, self.shift_bytes)
     
     #list of movie_ids sorted by bayesian wegithed ratings, descending
     self.cold_start_rankings = self._prep_cold_start_rankings(ratings_pl, movies_pl)
@@ -57,8 +57,8 @@ class Retrieval:
     #create indexes using saved_models
     inputs_dict_np = Retrieval._polars_to_numpy_dict(ratings_pl)
     examples_list = convert_dict_inputs_to_tfexample_ser(inputs_dict_np) #list[bytes]
-    self.user_indexers = self._create_user_indexers(examples_list)
-    self.movie_indexers = self._create_movie_indexers(examples_list)
+    self.user_indexers = Retrieval._create_user_indexers(examples_list, self.loaded_user_movie_model, self.max_k)
+    self.movie_indexers = Retrieval._create_movie_indexers(examples_list, self.loaded_user_movie_model, self.max_k)
    
   def _get_metadata_predictions(metadata_saved_model_dir:str, movies:pl.DataFrame) -> pl.DataFrame:
     #the model requires ratings_joined column,
@@ -85,13 +85,13 @@ class Retrieval:
     )
     return movies # movie_id, title, genres, predicted_from_genres
     
-  def _create_movie_indexers(inputs: Union[Dict[str, np.ndarray], List[bytes]], _create_user_embeddings, max_k:int) -> np.ndarray:
+  def _create_movie_indexers(inputs: Union[Dict[str, np.ndarray], List[bytes]], loaded_user_movie_model, max_k:int) -> np.ndarray:
     """
     note that the indexes are w.r.t the ordering given in ratings_pl
     :param ratings_pl:
     :return:
     """
-    embeddings_np = Retrieval._create_movie_embeddings(inputs, _create_user_embeddings)
+    embeddings_np = Retrieval._create_movie_embeddings(inputs, loaded_user_movie_model)
     if Retrieval.is_linux:
       indexer = Retrieval.build_scann_searcher(embeddings=embeddings_np, top_k=max_k)
     else:
@@ -99,11 +99,17 @@ class Retrieval:
       indexer = Retrieval.build_faiss_index(embeddings=embeddings_np, dimension=d)
     return indexer
 
-  def _init_rbloom(self, ratings: pl.DataFrame) -> Bloom:
+  def _init_rbloom(ratings: pl.DataFrame, shift_bytes:int) -> Bloom:
+    """
+    :param ratings: polars dataframe having columns "user_id" and "movie_id".  rating doesn't have to be prosent but the relationship
+    implicitly indicates that there was a rating
+    :param shift_bytes:
+    :return:
+    """
     # 12 MB memory?
     users = ratings['user_id'].unique()
     u_bf = Bloom(10*users.count(), 0.01)
-    u_bf.update([users.to_list()])
+    u_bf.update(users.to_list())
     # 17 MB memory?
     n_user_movies = len(ratings.count())
     um_bf = Bloom(10 * n_user_movies, 0.001)
@@ -111,7 +117,7 @@ class Retrieval:
     user_idx = ratings.columns.index('user_id')
     movie_idx = ratings.columns.index('movie_id')
     for row_tuple in ratings.iter_rows():
-      um_bf.add(row_tuple[user_idx] << self.shift_bytes + row_tuple[movie_idx])
+      um_bf.add(row_tuple[user_idx] << shift_bytes + row_tuple[movie_idx])
     return u_bf, um_bf
  
   def _agg_movie_counts(ratings: pl.DataFrame, movies:pl.DataFrame) -> pl.DataFrame:
@@ -164,7 +170,7 @@ class Retrieval:
     searcher = bind1.score_brute_force(quantize=False).build()
     return searcher
   
-  def _polars_to_numpy_dict(df: pl.DataFrame) -> np.ndarray:
+  def _polars_to_numpy_dict(df: pl.DataFrame) -> Dict[str, np.ndarray]:
     inp_dict = df.to_dict(as_series=False)
     for key in inp_dict.keys():
       if isinstance(inp_dict[key][0], str):
@@ -278,3 +284,25 @@ class Retrieval:
       d = np.shape(embeddings_np)[1]
       indexer = Retrieval.build_faiss_index(embeddings=embeddings_np, dimension=d)
     return indexer
+
+  def is_user_known(self, user_id):
+    return user_id in self.user_bloom_filter
+
+  def get_predictions(self, ratings: pl.DataFrame, movies:pl.DataFrame):
+    pass
+  
+  def get_movies_given_user(self, users, top_k):
+    #vector search for nearest movies.  use ranking, sort, return top_k
+    pass
+
+  def get_user_given_user(self, users, top_k):
+    #vector search for similar users.  then find similar movies, then use ranking, sort and return top_k
+    pass
+  
+  def get_movies_given_movie(self, movies, top_k):
+    #vector search for nearest movies.  use ranking, sort, return top_k
+    pass
+  
+  def get_user_given_movie(self, movies, top_k):
+    #vector search for similar users.  agg their ratings, sort, return top_k
+    pass

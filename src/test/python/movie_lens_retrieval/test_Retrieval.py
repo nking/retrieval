@@ -1,4 +1,4 @@
-import sys
+import random
 from unittest import TestCase
 import polars as pl
 import tensorflow.saved_model as saved_model
@@ -126,7 +126,59 @@ class TestRetrieval(TestCase):
     self.assertEqual(len(ranked), max_k)
     
   def test__init_rbloom(self):
-    pass
+    shift_bytes = 13
+    file_paths = [os.path.join(get_project_dir(),
+      "src/test/resources/data/ratings_sorted_1_joined*parquet"),
+      os.path.join(get_project_dir(),
+      "src/test/resources/data/ratings_sorted_2_joined*parquet")]
+    ratings_pl_1 = Retrieval._read_ratings([file_paths[0]])
+    #ratings_pl_2 = Retrieval._read_ratings([file_paths[1]])
+    
+    max_user_id = ratings_pl_1["user_id"].max()
+    
+    user_bloom_filter, user_movie_bloom_filter = Retrieval._init_rbloom(ratings_pl_1, shift_bytes)
+    
+    #test that all out-of-vocabulary user_ids are not in bloom filter
+    n_false_u = 0
+    for _ in range(100_000):
+      user_id = random.randint(max_user_id+1, max_user_id+10_000)
+      if user_id in user_bloom_filter:
+        n_false_u += 1
+    fpr = n_false_u/100_000
+    print(f'false positive rate for user bloom filter = {fpr}, expected = 0.01')
+    self.assertLessEqual(fpr, 0.01)
+    
+    """
+      GT       True   False
+    PRED  TRUE  TP     FP
+          FALSE FN     TN
+                T      F
+    """
+    
+    #TODO: test the errors for false positives of users and user_movie combinations for those that are in ratings_pl_1
+    user_idx = ratings_pl_1.columns.index("user_id")
+    movie_idx = ratings_pl_1.columns.index("movie_id")
+    n = ratings_pl_1.shape[0]
+    n_false_um = 0
+    n_false_u = 0
+    for _ in range(100_000):
+      row = ratings_pl_1.row(np.random.randint(1, n))
+      user_id = row[user_idx]
+      movie_id = row[movie_idx]
+      encoded = (user_id << shift_bytes) + movie_id
+      if encoded not in user_movie_bloom_filter:
+        n_false_um += 1
+      if user_id not in user_bloom_filter:
+        n_false_u += 1
+        
+    fnr = n_false_u / 100_000
+    fnr_um = n_false_um / 100_000
+    #um 0.001
+    #u 0.01
+    print(f'false negative rate for user-movie bloom filter = {fnr_um}')
+    print( f'false negative rate for user bloom filter = {fnr}')
+    self.assertLessEqual(fnr, 0.01)
+    self.assertLessEqual(fnr_um, 0.001)
  
   def test_get_cold_start_rankings(self):
     pass

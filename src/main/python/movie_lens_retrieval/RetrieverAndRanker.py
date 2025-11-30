@@ -1,5 +1,5 @@
 import platform
-from typing import Union, List, Dict
+from typing import Union, List, Dict, Tuple
 from movie_lens_retrieval.misc.inferrence_data_prep import convert_dict_inputs_to_tfexample_ser
 import tensorflow as tf
 import numpy as np
@@ -15,24 +15,26 @@ logging.set_stderrthreshold(logging.WARNING)
 # if linux, ScaNN is used,
 # else Faiss is used.  The CPU version of Faiss is installed, but could be changed to faiss-gpu
 
-class Retrieval:
+class RetrieverAndRanker:
   #static members:
   is_linux = platform.system().lower() == "linux"
   if is_linux:
     import scann
     
   def __init__(self, user_movie_saved_model_dir:str, metadata_saved_model_dir:str,
-    movies_path: str,  ratings_paths:list[str], max_k: int = 1000, dynamically_rank:bool=False):
+    movies_path: str,  ratings_paths:list[str], max_k: int = 1000,
+    #dynamically_rank:bool=False
+    ):
     """
     NOTE that data should only contain data up to and including training data and eval data. no test
     data should be included.
     TODO: add cloud config options as needed and adapt as needed for hosted models
-    :param user_movie_saved_model_dir:
-    :param metadata_saved_model_dir:
-    :param movies_paths: list of glob file path pattern to the parquet files contained all movie_ids
+    :param user_movie_saved_model_dir: path to the saved_model directory for the main user_movie mondel
+    :param metadata_saved_model_dir: path to the saved_model directory for the metadata model
+    :param movies_paths: list of glob file path pattern to the parquet files containing all movie_ids
     :param ratings_path: list of glob file path pattern to the joined ratings parquet files
-    :param max_k:
-    :param dynamically_rank:
+    :param max_k: the largest number of movies or users to be returned for each query element
+    in an approximate nearest neighbor search.
     """
     self.max_k = max_k
     
@@ -43,36 +45,36 @@ class Retrieval:
       movies_pl = pl.read_parquet(movies_path, glob=True)
     
     self.ratings_paths = ratings_paths
-    ratings_pl = Retrieval._read_ratings(ratings_paths)
+    ratings_pl = RetrieverAndRanker._read_ratings(ratings_paths)
     
-    self.dynamically_rank = dynamically_rank
+    #self.dynamically_rank = dynamically_rank
     self.shift_bytes = 13
-    self.user_bloom_filter, self.user_movie_bloom_filter = Retrieval._init_rbloom(ratings_pl, self.shift_bytes)
-    
-    #list of movie_ids sorted by bayesian wegithed ratings, descending
-    self.cold_start_rankings = self._prep_cold_start_rankings(ratings_pl, movies_pl)
+    self.user_bloom_filter, self.user_movie_bloom_filter = RetrieverAndRanker._init_rbloom(ratings_pl, self.shift_bytes)
     
     self.loaded_user_movie_model = tf.saved_model.load(user_movie_saved_model_dir)
     
     #create indexes using saved_models
-    inputs_dict_np = Retrieval._polars_to_numpy_dict(ratings_pl)
-    examples_list = convert_dict_inputs_to_tfexample_ser(inputs_dict_np) #list[bytes]
-    self.user_indexers = Retrieval._create_user_indexers(examples_list, self.loaded_user_movie_model, self.max_k)
-    self.movie_indexers = Retrieval._create_movie_indexers(examples_list, self.loaded_user_movie_model, self.max_k)
-   
+    inputs_dict_np = RetrieverAndRanker._polars_to_numpy_dict(ratings_pl) #TODO: improve if possible
+    examples_list = convert_dict_inputs_to_tfexample_ser(inputs_dict_np) #TODO: improve if possible
+    # longest step in computations:
+    self.user_indexers = RetrieverAndRanker._create_user_indexers(examples_list, self.loaded_user_movie_model, self.max_k)
+    self.movie_indexers = RetrieverAndRanker._create_movie_indexers(examples_list, self.loaded_user_movie_model, self.max_k)
+    self.user_ids = inputs_dict_np['user_id'].numpy().tolist()
+    self.movie_ids = inputs_dict_np['movie_id'].numpy().tolist()
+    
+    #adds column "predicted_from_genres"
+    predicted_mdm = RetrieverAndRanker._get_metadata_predictions(metadata_saved_model_dir, movies_pl)
+    self.cold_start_rankings = self._prep_cold_start_rankings(ratings_pl, movies_pl, "predicted_from_genres")
+    
+  
   def _get_metadata_predictions(metadata_saved_model_dir:str, movies:pl.DataFrame) -> pl.DataFrame:
     #the model requires ratings_joined column,
     # but only useds movie_id and genres as inputs
-    inputs_dict_np = Retrieval._polars_to_numpy_dict(movies)
+    inputs_dict_np = RetrieverAndRanker._polars_to_numpy_dict(movies)
     del inputs_dict_np['title']
     #add fake data for the user_id,timestamp,gender,age,occupation
-    n = len(inputs_dict_np['movie_id'])
-    for key in ["user_id", "age", "occupation"]:
-      inputs_dict_np[key] = np.array([[0] for _ in range(n)])
-    inputs_dict_np['gender'] = np.random.choice(np.array([b'M', b'F']), size=n, replace=True)
-    inputs_dict_np['gender'] = inputs_dict_np['gender'].reshape(-1, 1)
-    inputs_dict_np['timestamp'] = np.array([[966606623] for _ in range(n)])
-    
+    RetrieverAndRanker.fill_missing_cols_with_fake(inputs_dict_np)
+   
     examples_list = convert_dict_inputs_to_tfexample_ser(inputs_dict_np)
   
     movie_model = tf.saved_model.load(metadata_saved_model_dir)
@@ -91,25 +93,25 @@ class Retrieval:
     :param ratings_pl:
     :return:
     """
-    embeddings_np = Retrieval._create_movie_embeddings(inputs, loaded_user_movie_model)
-    if Retrieval.is_linux:
-      indexer = Retrieval.build_scann_searcher(embeddings=embeddings_np, top_k=max_k)
+    embeddings_np = RetrieverAndRanker._create_movie_embeddings(inputs, loaded_user_movie_model)
+    if RetrieverAndRanker.is_linux:
+      indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings_np, top_k=max_k)
     else:
       d = np.shape(embeddings_np)[1]
-      indexer = Retrieval.build_faiss_index(embeddings=embeddings_np, dimension=d)
+      indexer = RetrieverAndRanker.build_faiss_index(embeddings=embeddings_np, dimension=d)
     return indexer
 
-  def _init_rbloom(ratings: pl.DataFrame, shift_bytes:int) -> Bloom:
+  def _init_rbloom(ratings: pl.DataFrame, shift_bytes:int) -> Tuple[Bloom, Bloom]:
     """
     :param ratings: polars dataframe having columns "user_id" and "movie_id".  rating doesn't have to be prosent but the relationship
     implicitly indicates that there was a rating
     :param shift_bytes:
-    :return:
+    :return: tuple of tuple of user bloom filter and user_ids for it, and a user-movie bloom filter
     """
     # 12 MB memory?
-    users = ratings['user_id'].unique()
-    u_bf = Bloom(10*users.count(), 0.01)
-    u_bf.update(users.to_list())
+    users = ratings['user_id'].unique().to_list()
+    u_bf = Bloom(10*len(users), 0.01)
+    u_bf.update(users)
     # 17 MB memory?
     n_user_movies = len(ratings.count())
     um_bf = Bloom(10 * n_user_movies, 0.001)
@@ -137,18 +139,13 @@ class Retrieval:
     return pivoted.vstack(missing_df)
   
   def _prep_cold_start_rankings(ratings: pl.DataFrame, movies:pl.DataFrame, max_k:int, prior_rating_column_name:str=None):
-    pivoted = Retrieval._agg_movie_counts(ratings, movies)
+    pivoted = RetrieverAndRanker._agg_movie_counts(ratings, movies)
     b = BayesianShrinkageEstimator(pivoted, prior_rating_column_name)
     return b.get_top(max_k)
     
-  def get_cold_start_rankings(self, ratings: pl.DataFrame, movies:pl.DataFrame, max_k:int):
-    if self.dynamically_rank:
-      #create cold start data for users not in system
-      pivoted = Retrieval._agg_movie_counts(ratings, movies)
-      b = BayesianShrinkageEstimator(pivoted)
-      self.cold_start_rankings = b.get_top(max_k)
-    return self.cold_start_rankings
-
+  def get_cold_start_rankings(self, top_k:int):
+      self.cold_start_rankings[:top_k].copy()
+   
   #@keras.saving.register_keras_serializable(package="",name="build_scann_searcher")
   def build_scann_searcher(embeddings: np.ndarray, top_k: int):
     '''
@@ -164,9 +161,8 @@ class Retrieval:
     '''
     if embeddings.dtype != np.float32:
       raise Exception(f'embeddings must be dtype np.float32\n')
-    n = len(embeddings)
     import scann
-    bind1 = scann.scann_ops_pybind.builder(embeddings, top_k, "dot_product")
+    bind1 = scann.scann_ops_pybind.builder(db=embeddings, num_neighbors=top_k, distance_measure="dot_product")
     searcher = bind1.score_brute_force(quantize=False).build()
     return searcher
   
@@ -277,32 +273,87 @@ class Retrieval:
     :param ratings_pl:
     :return:
     """
-    embeddings_np = Retrieval._create_user_embeddings(inputs, loaded_user_movie_model)
-    if Retrieval.is_linux:
-      indexer = Retrieval.build_scann_searcher(embeddings=embeddings_np, top_k=max_k)
+    embeddings_np = RetrieverAndRanker._create_user_embeddings(inputs, loaded_user_movie_model)
+    if RetrieverAndRanker.is_linux:
+      indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings_np, top_k=max_k)
     else:
       d = np.shape(embeddings_np)[1]
-      indexer = Retrieval.build_faiss_index(embeddings=embeddings_np, dimension=d)
+      indexer = RetrieverAndRanker.build_faiss_index(embeddings=embeddings_np, dimension=d)
     return indexer
 
   def is_user_known(self, user_id):
     return user_id in self.user_bloom_filter
-
-  def get_predictions(self, ratings: pl.DataFrame, movies:pl.DataFrame):
-    pass
   
-  def get_movies_given_user(self, users, top_k):
-    #vector search for nearest movies.  use ranking, sort, return top_k
-    pass
+  def has_seen_movie(self, user_id, movie_id):
+    return (user_id << self.shift_bytes) + movie_id in self.user_movie_bloom_filter
 
-  def get_user_given_user(self, users, top_k):
+  #def get_predictions(self, data):
+  #  pass
+  
+  def fill_missing_cols_with_fake(inp_dict:Dict[str, Union[int, bytes]]):
+    """populate an inputs dictionary for a model signature needing the joined raw file columns"""
+    for key in inp_dict:
+      n = len(inp_dict[key])
+      break
+    for key in ["movie_id", "user_id", "age", "occupation"]:
+      if key not in inp_dict:
+        inp_dict[key] = np.array([[0] for _ in range(n)])
+    if "gender" not in inp_dict:
+      inp_dict['gender'] = np.random.choice(np.array([b'M', b'F']), size=n, replace=True)
+      inp_dict['gender'] = inp_dict['gender'].reshape(-1, 1)
+    if "timestamp" not in inp_dict:
+      inp_dict['timestamp'] = np.array([[966606623] for _ in range(n)])
+    if "genres" not in inp_dict:
+      inp_dict['genres'] = np.array([[b'Drama'] for _ in range(n)])
+
+  def get_users_given_users(self, user_data_dict:Dict[str, Union[int, bytes]], top_k:int):
+    #to find similar users requires all ratings_joined columns, but only the user_id and age are used for latest model.
+    # TODO: the best hyperparams for a model need to be read by this class and used where needed.
     #vector search for similar users.  then find similar movies, then use ranking, sort and return top_k
-    pass
+    RetrieverAndRanker.fill_missing_cols_with_fake(user_data_dict)
+    # TODO: create user embeddings
+    # TODO: find top_k similar users for each row in user_data_dict
+    user_embeddings = RetrieverAndRanker._create_user_embeddings(user_data_dict, self.loaded_user_movie_model)
+    if RetrieverAndRanker.is_linux:
+      #indexes are insert order indexes
+      neighbor_idxs, distances = self.user_indexers.search_batched(user_embeddings, top_k=top_k)
+    else:
+      distances, neighbor_idxs = self.user_indexers.search(user_embeddings, top_k)
+    nearest_user_ids = [[self.user_ids[i] for i in _list] for _list in neighbor_idxs]
+    return nearest_user_ids
   
-  def get_movies_given_movie(self, movies, top_k):
-    #vector search for nearest movies.  use ranking, sort, return top_k
-    pass
+  def get_movies_given_movie(self, movie_data_dict:Dict[str, Union[int, bytes]], top_k:int):
+    #to find similar movies requires all ratings_joined columns, but only the movie_id and genres are used for latest model.
+    RetrieverAndRanker.fill_missing_cols_with_fake(movie_data_dict)
+    # TODO: create user embeddings
+    # TODO: find top_k similar users for each row in user_data_dict
+    movie_embeddings = RetrieverAndRanker._create_movieembeddings(movie_data_dict, self.loaded_user_movie_model)
+    if RetrieverAndRanker.is_linux:
+      #indexes are insert order indexes
+      neighbor_idxs, distances = self.movie_indexers.search_batched(movie_embeddings, top_k=top_k)
+    else:
+      distances, neighbor_idxs = self.movie_indexers.search(movie_embeddings, top_k)
+    nearest_user_ids = [[self.movie_ids[i] for i in _list] for _list in neighbor_idxs]
+    return nearest_user_ids
   
-  def get_user_given_movie(self, movies, top_k):
-    #vector search for similar users.  agg their ratings, sort, return top_k
-    pass
+  def get_user_given_movie(self, movie_data_dict:Dict[str, Union[int, bytes]], top_k:int):
+    RetrieverAndRanker.fill_missing_cols_with_fake(movie_data_dict)
+    movie_embeddings = RetrieverAndRanker._create_movie_embeddings(movie_data_dict, self.loaded_user_movie_model)
+    if RetrieverAndRanker.is_linux:
+      #indexes are insert order indexes
+      neighbor_idxs, distances = self.user_indexers.search_batched(movie_embeddings, top_k=top_k)
+    else:
+      distances, neighbor_idxs = self.user_indexers.search(movie_embeddings, top_k)
+    nearest_user_ids = [[self.user_ids[i] for i in _list] for _list in neighbor_idxs]
+    return nearest_user_ids
+
+  def get_movies_given_user(self, user_data_dict:Dict[str, Union[int, bytes]], top_k:int):
+    RetrieverAndRanker.fill_missing_cols_with_fake(user_data_dict)
+    user_embeddings = RetrieverAndRanker._create_movieembeddings(user_data_dict, self.loaded_user_movie_model)
+    if RetrieverAndRanker.is_linux:
+      #indexes are insert order indexes
+      neighbor_idxs, distances = self.movie_indexers.search_batched(user_embeddings, top_k=top_k)
+    else:
+      distances, neighbor_idxs = self.movie_indexers.search(user_embeddings, top_k)
+    nearest_user_ids = [[self.movie_ids[i] for i in _list] for _list in neighbor_idxs]
+    return nearest_user_ids

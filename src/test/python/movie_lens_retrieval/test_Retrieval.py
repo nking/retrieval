@@ -90,7 +90,7 @@ class TestRetrieval(TestCase):
       "src/test/resources/data/sorted_1/ratings_sorted_1_joined*parquet")]
     ratings_pl = RetrieverAndRanker._read_ratings(file_paths)
     file_path = os.path.join(get_project_dir(),
-      "src/test/resources/data/movies*parquet")
+      "src/test/resources/data/movies/movies*parquet")
     movies_pl = pl.read_parquet(file_path, glob=True)
     pivoted = RetrieverAndRanker._agg_movie_counts(ratings_pl, movies_pl)
     self.assertEqual(len(pivoted.columns), 6)
@@ -108,7 +108,7 @@ class TestRetrieval(TestCase):
     metadata_saved_model_dir = os.path.join(get_project_dir(),
       "src/main/resources/serving_models/metadata_model")
     file_path = os.path.join(get_project_dir(),
-      "src/test/resources/data/movies*parquet")
+      "src/test/resources/data/movies/movies*parquet")
     movies_pl = pl.read_parquet(file_path, glob=True)
     #movie_id, title, genres, predicted_from_genres
     movies = RetrieverAndRanker._get_metadata_predictions(metadata_saved_model_dir, movies_pl)
@@ -188,7 +188,7 @@ class TestRetrieval(TestCase):
     metadata_saved_model_dir = os.path.join(get_project_dir(),
       "src/main/resources/serving_models/metadata_model")
     movies_path = os.path.join(get_project_dir(),
-      "src/test/resources/data/movies*parquet")
+      "src/test/resources/data/movies/movies*parquet")
     ratings_paths = [os.path.join(get_project_dir(),
       "src/test/resources/data/sorted_1/ratings_sorted_1_joined*parquet"),
       os.path.join(get_project_dir(),

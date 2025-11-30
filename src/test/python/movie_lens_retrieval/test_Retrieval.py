@@ -8,7 +8,8 @@ import numpy as np
 class TestRetrieval(TestCase):
   
   def test__read_ratings(self):
-    file_paths = [os.path.join(get_project_dir(), "src/test/resources/data/ratings_sorted_1_joined*parquet")]
+    file_paths = [os.path.join(get_project_dir(),
+      "src/test/resources/data/sorted_1/ratings_sorted_1_joined*parquet")]
     ratings_pl = RetrieverAndRanker._read_ratings(file_paths)
     self.assertIsNotNone(ratings_pl)
     n_rows = ratings_pl['movie_id'].count()
@@ -19,9 +20,9 @@ class TestRetrieval(TestCase):
     self.assertTrue("rating" in ratings_pl.columns)
     
     file_paths = [os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_1_joined*parquet"),
+      "src/test/resources/data/sorted_1/ratings_sorted_1_joined*parquet"),
       os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_2_joined*parquet")]
+      "src/test/resources/data/sorted_2/ratings_sorted_2_joined*parquet")]
     ratings_pl = RetrieverAndRanker._read_ratings(file_paths)
     n_rows = ratings_pl['movie_id'].count()
     self.assertGreater(n_rows, 1_000_000)
@@ -33,9 +34,9 @@ class TestRetrieval(TestCase):
   def test_create_embeddings(self):
     #def _create_user_embeddings(inputs: Union[Dict[str, np.ndarray], List[bytes]]) -> np.ndarray:
     file_paths = [os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_1_joined*parquet"),
+      "src/test/resources/data/sorted_1/ratings_sorted_1_joined*parquet"),
       os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_2_joined*parquet")]
+      "src/test/resources/data/sorted_2/ratings_sorted_2_joined*parquet")]
     ratings_pl = RetrieverAndRanker._read_ratings(file_paths)
     self.assertGreater(ratings_pl['user_id'].count(), 1_000_000)
     
@@ -56,7 +57,7 @@ class TestRetrieval(TestCase):
     
   def test__create_user_indexers(self):
     file_paths = [os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_1_joined*parquet")]
+      "src/test/resources/data/sorted_1/ratings_sorted_1_joined*parquet")]
     ratings_pl = RetrieverAndRanker._read_ratings(file_paths)
     inputs_dict_np = RetrieverAndRanker._polars_to_numpy_dict(ratings_pl.head(1100))
     max_k = 10
@@ -86,7 +87,7 @@ class TestRetrieval(TestCase):
   
   def test__agg_movie_counts(self):
     file_paths = [os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_1_joined*parquet")]
+      "src/test/resources/data/sorted_1/ratings_sorted_1_joined*parquet")]
     ratings_pl = RetrieverAndRanker._read_ratings(file_paths)
     file_path = os.path.join(get_project_dir(),
       "src/test/resources/data/movies*parquet")
@@ -117,9 +118,9 @@ class TestRetrieval(TestCase):
     
     max_k = 10
     file_paths = [os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_1_joined*parquet"),
+      "src/test/resources/data/sorted_1/ratings_sorted_1_joined*parquet"),
       os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_2_joined*parquet")]
+      "src/test/resources/data/sorted_2/ratings_sorted_2_joined*parquet")]
     ratings_pl = RetrieverAndRanker._read_ratings(file_paths)
     ranked = RetrieverAndRanker._prep_cold_start_rankings(ratings_pl, movies_pl,
                                                           max_k, "predicted_from_genres")
@@ -128,9 +129,9 @@ class TestRetrieval(TestCase):
   def test__init_rbloom(self):
     shift_bytes = 13
     file_paths = [os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_1_joined*parquet"),
+      "src/test/resources/data/sorted_1/sorted_1/ratings_sorted_1_joined*parquet"),
       os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_2_joined*parquet")]
+      "src/test/resources/data/sorted_2/sorted_2/ratings_sorted_2_joined*parquet")]
     ratings_pl_1 = RetrieverAndRanker._read_ratings([file_paths[0]])
     #ratings_pl_2 = Retrieval._read_ratings([file_paths[1]])
     
@@ -189,9 +190,9 @@ class TestRetrieval(TestCase):
     movies_path = os.path.join(get_project_dir(),
       "src/test/resources/data/movies*parquet")
     ratings_paths = [os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_1_joined*parquet"),
+      "src/test/resources/data/sorted_1/ratings_sorted_1_joined*parquet"),
       os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_sorted_2_joined*parquet")]
+      "src/test/resources/data/sorted_2/ratings_sorted_2_joined*parquet")]
     max_k = 1_000
     
     r = RetrieverAndRanker(user_movie_saved_model_dir=user_movie_saved_model_dir,

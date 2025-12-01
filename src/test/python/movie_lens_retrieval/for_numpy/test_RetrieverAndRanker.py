@@ -2,7 +2,7 @@ import random
 from unittest import TestCase
 import polars as pl
 import tensorflow.saved_model as saved_model
-from movie_lens_retrieval.RetrieverAndRanker import RetrieverAndRanker
+from movie_lens_retrieval.for_numpy.RetrieverAndRanker import RetrieverAndRanker
 from helper import *
 import numpy as np
 class TestRetrieval(TestCase):
@@ -75,7 +75,6 @@ class TestRetrieval(TestCase):
       self.assertTrue(0 in neighbor_idxs[0])
       self.assertTrue(1 in neighbor_idxs[1])
     #can test faiss on all major OSes:
-    import faiss
     sav = RetrieverAndRanker.is_linux
     RetrieverAndRanker.is_linux = False
     users_indexer = RetrieverAndRanker._create_user_indexers(inputs_dict_np, user_movie_model, max_k = max_k)

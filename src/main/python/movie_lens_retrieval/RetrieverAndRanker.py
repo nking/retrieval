@@ -1,153 +1,234 @@
-import platform
-from typing import Union, List, Dict, Tuple
-from movie_lens_retrieval.misc.inferrence_data_prep import convert_dict_inputs_to_tfexample_ser
+from typing import Union, List, Dict, Tuple, Any
 import tensorflow as tf
-import numpy as np
 from rbloom import Bloom
-import polars as pl
+from google.protobuf import text_format
+import random
+import glob
 
-from movie_lens_retrieval.misc.Bayesian import BayesianShrinkageEstimator
 from absl import logging
 logging.set_verbosity(logging.WARNING)
 logging.set_stderrthreshold(logging.WARNING)
 
-#the imports are now handled by pyproject.toml or setup.py
-# if linux, ScaNN is used,
-# else Faiss is used.  The CPU version of Faiss is installed, but could be changed to faiss-gpu
+import scann
+
+"""
+NOTE that data should only contain data up to and including training data and eval data. no test
+data should be included.
+
+TODO: should use MLMD and model lineage for the saved_models and data and schema
+
+TODO: add cloud config options as needed and adapt as needed for hosted models
+
+For cloud based RetrieverAndRanker, can adapt for services for ScANN and bloom filters.
+"""
 
 class RetrieverAndRanker:
-  #static members:
-  is_linux = platform.system().lower() == "linux"
-  if is_linux:
-    import scann
-    
-  def __init__(self, user_movie_saved_model_dir:str, metadata_saved_model_dir:str,
-    movies_path: str,  ratings_paths:list[str], max_k: int = 1000,
-    #dynamically_rank:bool=False
+  
+  def __init__(self, user_movie_saved_model_dir:str,
+    movies_path: str,  users_path:str, ratings_paths:list[str],
+    movie_pivot_path:str, movie_pivot_pred_col_name:str=None,  max_k: int = 1000,
+    movies_batch_size:int=256, ratings_batch_size:int=256
     ):
     """
-    NOTE that data should only contain data up to and including training data and eval data. no test
-    data should be included.
-    TODO: add cloud config options as needed and adapt as needed for hosted models
-    :param user_movie_saved_model_dir: path to the saved_model directory for the main user_movie mondel
-    :param metadata_saved_model_dir: path to the saved_model directory for the metadata model
-    :param movies_paths: list of glob file path pattern to the parquet files containing all movie_ids
-    :param ratings_path: list of glob file path pattern to the joined ratings parquet files
-    :param max_k: the largest number of movies or users to be returned for each query element
-    in an approximate nearest neighbor search.
+    param user_movie_saved_model_dir: path to the saved_model directory for the main user_movie model.
+        the embeddings model signatures are in this.
+    :param movies_path:
+    :param users_path:
+    :param ratings_paths:
+    :param movie_pivot_path:
+    :param movie_pivot_pred_col_name:
+    :param max_k:
+    :param movies_batch_size:
+    :param ratings_batch_size:
     """
+    
     self.max_k = max_k
-    
-    self.movies_path = movies_path
-    if '*' in movies_path:
-      movies_pl = pl.read_parquet(movies_path, glob=True)
-    else:
-      movies_pl = pl.read_parquet(movies_path, glob=True)
-    
-    self.ratings_paths = ratings_paths
-    ratings_pl = RetrieverAndRanker._read_ratings(ratings_paths)
-    
-    #self.dynamically_rank = dynamically_rank
-    self.shift_bytes = 13
-    self.user_bloom_filter, self.user_movie_bloom_filter = RetrieverAndRanker._init_rbloom(ratings_pl, self.shift_bytes)
     
     self.loaded_user_movie_model = tf.saved_model.load(user_movie_saved_model_dir)
     
-    #create indexes using saved_models
-    inputs_dict_np = RetrieverAndRanker._polars_to_numpy_dict(ratings_pl) #TODO: improve if possible
-    examples_list = convert_dict_inputs_to_tfexample_ser(inputs_dict_np) #TODO: improve if possible
+    #  easier to hard code a dictionary for now than install and import tfx transform to read schema
+    #string serialized examples => dict of inputs
+    self.feature_spec = {"user_id": tf.io.FixedLenFeature([], tf.int64),
+      "movie_id":tf.io.FixedLenFeature([], tf.int64),
+      "rating" : tf.io.FixedLenFeature([], tf.int64),
+      "timestamp": tf.io.FixedLenFeature([], tf.int64),
+      "gender" : tf.io.FixedLenFeature([], tf.string),
+      "age" : tf.io.FixedLenFeature([], tf.int64),
+      "occupation" : tf.io.FixedLenFeature([], tf.int64),
+      "genres" : tf.io.FixedLenFeature([], tf.string)}
+    
+    # create indexes using saved_models
     # longest step in computations:
-    self.user_indexers = RetrieverAndRanker._create_user_indexers(examples_list, self.loaded_user_movie_model, self.max_k)
-    self.movie_indexers = RetrieverAndRanker._create_movie_indexers(examples_list, self.loaded_user_movie_model, self.max_k)
-    self.user_ids = inputs_dict_np['user_id'].numpy().tolist()
-    self.movie_ids = inputs_dict_np['movie_id'].numpy().tolist()
+    self.user_indexers, self.user_ids_ds = RetrieverAndRanker._create_user_indexers(users_path,
+      self.loaded_user_movie_model, self.feature_spec, self.max_k)
+    self.movie_indexers, self.movie_ids_ds = RetrieverAndRanker._create_movie_indexers(movies_path,
+      self.loaded_user_movie_model, self.feature_spec, self.max_k)
     
-    #adds column "predicted_from_genres"
-    predicted_mdm = RetrieverAndRanker._get_metadata_predictions(metadata_saved_model_dir, movies_pl)
-    self.cold_start_rankings = self._prep_cold_start_rankings(ratings_pl, movies_pl, "predicted_from_genres")
+    pivot_feature_spec = {
+      "movie_id":tf.io.FixedLenFeature([], tf.int64),
+      "1" : tf.io.FixedLenFeature([], tf.int64),
+      "2": tf.io.FixedLenFeature([], tf.int64),
+      "3" : tf.io.FixedLenFeature([], tf.string),
+      "4" : tf.io.FixedLenFeature([], tf.int64),
+      "5" : tf.io.FixedLenFeature([], tf.int64)}
+    if movie_pivot_pred_col_name is None:
+      pivot_feature_spec[movie_pivot_pred_col_name] = tf.io.FixedLenFeature([], tf.int64)
     
-  
-  def _get_metadata_predictions(metadata_saved_model_dir:str, movies:pl.DataFrame) -> pl.DataFrame:
-    #the model requires ratings_joined column,
-    # but only useds movie_id and genres as inputs
-    inputs_dict_np = RetrieverAndRanker._polars_to_numpy_dict(movies)
-    del inputs_dict_np['title']
-    #add fake data for the user_id,timestamp,gender,age,occupation
-    RetrieverAndRanker.fill_missing_cols_with_fake(inputs_dict_np)
-   
-    examples_list = convert_dict_inputs_to_tfexample_ser(inputs_dict_np)
-  
-    movie_model = tf.saved_model.load(metadata_saved_model_dir)
-    infer = movie_model.signatures["serving_default"]
-    INPUT_KEY = list(infer.structured_input_signature[1].keys())[0]
+    # adds column "predicted_from_genres"
+    self.cold_start_rankings = self._prep_cold_start_rankings(movie_pivot_path, pivot_feature_spec,
+      movie_pivot_pred_col_name, self.max_k)
     
-    predicted = infer(**{INPUT_KEY: examples_list})['outputs'].numpy()
-    movies = movies.with_columns(
-      pl.Series(name="predicted_from_genres", values=predicted)
-    )
-    return movies # movie_id, title, genres, predicted_from_genres
-    
-  def _create_movie_indexers(inputs: Union[Dict[str, np.ndarray], List[bytes]], loaded_user_movie_model, max_k:int) -> np.ndarray:
-    """
-    note that the indexes are w.r.t the ordering given in ratings_pl
-    :param ratings_pl:
-    :return:
-    """
-    embeddings_np = RetrieverAndRanker._create_movie_embeddings(inputs, loaded_user_movie_model)
-    if RetrieverAndRanker.is_linux:
-      indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings_np, top_k=max_k)
-    else:
-      d = np.shape(embeddings_np)[1]
-      indexer = RetrieverAndRanker.build_faiss_index(embeddings=embeddings_np, dimension=d)
-    return indexer
+    #the ratings_ds is largest to load.
+    # it is used for the user_mode bloom filter to check whether user has not seen movie
+    ratings_ds = RetrieverAndRanker._joined_ratings_tt_to_ds(ratings_paths, self.feature_spec,
+      batch_size=2048)
 
-  def _init_rbloom(ratings: pl.DataFrame, shift_bytes:int) -> Tuple[Bloom, Bloom]:
-    """
-    :param ratings: polars dataframe having columns "user_id" and "movie_id".  rating doesn't have to be prosent but the relationship
-    implicitly indicates that there was a rating
-    :param shift_bytes:
-    :return: tuple of tuple of user bloom filter and user_ids for it, and a user-movie bloom filter
-    """
+    #using rbloom filters for less memory than tf.lookup.StaticHashTable.  would need to be reconsidered for cloud infrastruture
+    self.shift_bits = 13
+    self.user_bloom_filter, self.user_movie_bloom_filter = RetrieverAndRanker._init_rbloom(self.user_ids_ds,
+        ratings_ds, self.shift_bits)
+        
+  def _joined_ratings_tt_to_ds(file_path_globs:List[str], feature_spec:dict, batch_size:int=256):
+    GLOB_PATTERNS = file_path_globs
+    GZIP_PATTERN = r".*\.gz$"
+    def load_tfrecords(filepath):
+      """Creates a TFRecordDataset, setting compression based on the file path."""
+      is_compressed = tf.strings.regex_full_match(filepath, GZIP_PATTERN)
+      compression_type = tf.where(is_compressed, tf.constant("GZIP"), tf.constant(""))
+      return tf.data.TFRecordDataset(filepath, compression_type=compression_type)
+    
+    files_dataset = tf.data.Dataset.list_files(GLOB_PATTERNS, shuffle=False)
+    
+    records_dataset = files_dataset.interleave(
+      load_tfrecords, cycle_length=tf.data.AUTOTUNE,  block_length=1,
+      num_parallel_calls=tf.data.AUTOTUNE)
+    
+    def parse_tf_example(example_proto, feature_spec):
+      return tf.io.parse_single_example(example_proto, feature_spec)
+    
+    dataset = (records_dataset
+      .map(lambda x: parse_tf_example(x, feature_spec)).cache()
+      .batch(batch_size).prefetch(tf.data.AUTOTUNE))
+    
+    return dataset
+  
+  def _create_movie_indexers(movies_path: str,
+    loaded_user_movie_model, feature_spec:dict, max_k:int):
+    #-> Tuple[scann.ScannSearcher, List[int]]:
+    
+    _ct = "GZIP" if movies_path.endswith(".gz") else None
+    file_paths = glob.glob(movies_path)
+    ds_ser = tf.data.TFRecordDataset(file_paths, compression_type=_ct)
+    
+    candidate_model = loaded_user_movie_model.signatures["serving_candidate"]
+    INPUT_KEY = list(candidate_model.structured_input_signature[1].keys())[0]
+    embeddings = []
+    for batch in ds_ser:
+      emb = candidate_model(**{INPUT_KEY: batch})['outputs'] 
+      embeddings.append(emb)
+    embeddings = tf.concat(embeddings, 0)
+
+    indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings, top_k=max_k)
+
+    def parse_tf_example(example_proto, feature_spec):
+      row = tf.io.parse_single_example(example_proto, feature_spec)
+      return row['movie_id'].numpy()
+    ids = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+
+    return indexer, ids
+
+  def _init_rbloom(user_ids: List[int], ratings_ds: tf.data.Dataset, bits_shift:int=13) -> Tuple[Bloom, Bloom]:
+    
     # 12 MB memory?
-    users = ratings['user_id'].unique().to_list()
-    u_bf = Bloom(10*len(users), 0.01)
-    u_bf.update(users)
+    u_bf = Bloom(5*len(user_ids), 0.01)
+    u_bf.update(user_ids)
+      
     # 17 MB memory?
-    n_user_movies = len(ratings.count())
-    um_bf = Bloom(10 * n_user_movies, 0.001)
-    columns = ratings.columns
-    user_idx = ratings.columns.index('user_id')
-    movie_idx = ratings.columns.index('movie_id')
-    for row_tuple in ratings.iter_rows():
-      um_bf.add(row_tuple[user_idx] << shift_bytes + row_tuple[movie_idx])
+    n_ratings = ratings_ds.reduce(0, lambda x, _: x + 1).numpy()
+    
+    um_bf = Bloom(2*n_ratings, 0.001)
+    #TODO: consider batching:
+    for batch in ratings_ds:
+      user_idx = batch['user_id'].numpy()
+      movie_idx = batch['movie_id'].numpy()
+      um_bf.update((user_idx << bits_shift) + movie_idx)
+      
     return u_bf, um_bf
  
-  def _agg_movie_counts(ratings: pl.DataFrame, movies:pl.DataFrame) -> pl.DataFrame:
-    pivoted = ratings.pivot(
-      index="movie_id", columns="rating", values="rating", aggregate_function="count",
-    ).fill_null(0).sort("movie_id")
-    pivoted = pivoted.with_columns(
-      pl.col(name).cast(pl.Int32) for name in
-      [name for name in pivoted.columns if name != "movie_id"]
-    )
-    missing_df = movies.join(pivoted.select(pl.col("movie_id")),
-      on="movie_id", how="anti").select(pl.col("movie_id"))
-    rating_cols = [col for col in pivoted.columns if col != 'movie_id']
-    missing_df = missing_df.with_columns(
-      pl.lit(0).alias(col_name) for col_name in rating_cols
-    )
-    return pivoted.vstack(missing_df)
-  
-  def _prep_cold_start_rankings(ratings: pl.DataFrame, movies:pl.DataFrame, max_k:int, prior_rating_column_name:str=None):
-    pivoted = RetrieverAndRanker._agg_movie_counts(ratings, movies)
-    b = BayesianShrinkageEstimator(pivoted, prior_rating_column_name)
-    return b.get_top(max_k)
+  def _prep_cold_start_rankings(movies_pivot_path, feature_spec:Dict[str, Any],
+    prior_rating_column_name:str=None, max_k:int=1000):
     
-  def get_cold_start_rankings(self, top_k:int):
-      self.cold_start_rankings[:top_k].copy()
-   
+    _ct = "GZIP" if movies_pivot_path.endswith(".gz") else None
+    file_paths = glob.glob(movies_pivot_path)
+    pivot_ds_ser = tf.data.TFRecordDataset(file_paths, compression_type=".GZIP")
+    
+    def parse_tf_example(example_proto, feature_spec):
+      return tf.io.parse_single_example(example_proto, feature_spec)
+    pivot_ds = pivot_ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+    
+    #the pivot_ds rows are already ordered by descending prior_rating_column_name
+    movie_ids = []
+    i = 0
+    for x in pivot_ds:
+      if i == max_k:
+        break
+      movie_ids.append(x['movie_id'].numpy())
+      i += 1
+    return movie_ids
+  
+  def _create_serialized_tfexample(inputs:Dict[str, Union[int, str]]) -> bytes:
+    expected_keys = {'user_id':int, 'movie_id':int, 'rating':int, "timestamp":int,
+      "gender":str, "age":int, "occupation":int, "genres":str}
+    feature_map = {}
+    try:
+      for name, value in inputs.items():
+        element_type = expected_keys[name]
+        if element_type == float:
+          f = tf.train.Feature(float_list=tf.train.FloatList(value=[float(value)]))
+        elif element_type == int or element_type == bool:
+          f = tf.train.Feature(int64_list=tf.train.Int64List(value=[int(value)]))
+        elif element_type == str:
+          f = tf.train.Feature(bytes_list=tf.train.BytesList(value=[value.encode('utf-8')]))
+        else:
+          raise ValueError(f"element_type={element_type}, but only float, int, and str classes are handled.")
+        feature_map[name] = f
+    except Exception as ex:
+      logging.error(f"ERROR: {ex}, name={name}, value={value}, element_type={element_type}")
+      raise ex
+    try:
+      # add fake entries to make consistent with the joined ratings file columns
+      for out_name, out_type in expected_keys.items():
+        if out_name in feature_map:
+          continue
+        if out_type == float:
+          f = tf.train.Feature(float_list=tf.train.FloatList(value=[0.0]))
+        elif out_type == int or element_type == bool:
+          if out_name == "timestamp":
+            value = 956703932
+          else:
+            value = 0
+          f = tf.train.Feature(
+            int64_list=tf.train.Int64List(value=[value]))
+        elif out_type == str:
+          if out_name == "genres":
+            value = b"Drama"
+          elif out_name == "gender":
+            value = random.choice([b"M", b"F"])
+          else:
+            value = b""
+          f = tf.train.Feature( bytes_list=tf.train.BytesList(value=[value]))
+        else:
+          raise ValueError(
+            f"out_type={out_type}, but only float, int, and str classes are handled.")
+        feature_map[out_name] = f
+      tf_example = tf.train.Example(features=tf.train.Features(feature=feature_map))
+      return tf_example.SerializeToString()
+    except Exception as ex:
+      logging.error( f"ERROR: {ex}, out_name={out_name}, out_type={out_type}")
+      raise ex
+    
   #@keras.saving.register_keras_serializable(package="",name="build_scann_searcher")
-  def build_scann_searcher(embeddings: np.ndarray, top_k: int):
+  def build_scann_searcher(embeddings:tf.Tensor, top_k: int):
     '''
     build an ScANN indexer initialized with embeddings, and top_k number of nearest neighbors,
     and the brute force algorithm.
@@ -159,166 +240,103 @@ class RetrieverAndRanker:
     # https://github.com/google-research/google-research/blob/master/scann/docs/example.ipynb
     # https://github.com/google-research/google-research/blob/master/scann/docs/algorithms.md
     '''
-    if embeddings.dtype != np.float32:
-      raise Exception(f'embeddings must be dtype np.float32\n')
-    import scann
     bind1 = scann.scann_ops_pybind.builder(db=embeddings, num_neighbors=top_k, distance_measure="dot_product")
     searcher = bind1.score_brute_force(quantize=False).build()
     return searcher
   
-  def _polars_to_numpy_dict(df: pl.DataFrame) -> Dict[str, np.ndarray]:
-    inp_dict = df.to_dict(as_series=False)
-    for key in inp_dict.keys():
-      if isinstance(inp_dict[key][0], str):
-        arr_arr = [[bytes(item, 'utf-8')] for item in inp_dict[key]]
-      else:
-        arr_arr = [[item] for item in inp_dict[key]]
-      inp_dict[key] = np.array(arr_arr)
-    return inp_dict
-  
-  #@keras.saving.register_keras_serializable(package="", name="build_faiss_index")
-  def build_faiss_index(embeddings: np.ndarray, dimension: int):  # , ids: np.ndarray, dimension: int):
-    dimension = int(dimension)
-    if dimension < 1:
-      raise Exception(
-        f'dimension must be an integer > 0. dimension={dimension}\n')
-    if embeddings.dtype != np.float32:
-      raise Exception(f'embeddings must be dtype np.float32\n')
-    '''
-    Usage:
-    distances, top_ids = index.search(query, k)
-    distances = distances.reshape(-1)
-    top_ids = top_ids.reshape(-1)
-  
-    to speed up performance, try:
-    nlist = 100  # Number of clusters
-    quantizer = faiss.IndexFlatL2(dimension)
-    index = faiss.IndexIVFFlat(quantizer, dimension, nlist)
-    index.train(normalized_vectors)
-    index.add(normalized_vectors)
-  
-    '''
-    import faiss
-    index = faiss.IndexFlatIP(dimension)  # IP for inner product.  search is cosine similarity
-    # \index = faiss.IndexIDMap2(index)
-    # movie_embeddings = np.reshape(movie_embeddings, (-1, np.shape(movie_embeddings)[2]))
-    # print(f'shape movie_embeddings = {np.shape(movie_embeddings)}\n')
-    # movie_embeddings shape is (num_movies, embed_dim)
-    # print(f'len of embeddings, ids = {len(movie_embeddings), len(_movie_ids)}\n')
-    # index.add_with_ids(embeddings, ids)  # self.movie_ids)
-    index.add(embeddings)  # self.movie_ids)
-    return index
-    
-  def _read_ratings(ratings_paths: List[str]) -> pl.DataFrame:
-    combined = None
-    if len(ratings_paths) > 2:
-      for ratings_path in ratings_paths:
-        if '*' in ratings_path:
-          ratings_pl = pl.read_parquet(ratings_path, glob=True)
-        else:
-          ratings_pl = pl.read_parquet(ratings_path)
-        if combined is None:
-          combined = ratings_pl
-        else:
-          combined = combined.extend(ratings_pl)
-    else:
-      for ratings_path in ratings_paths:
-        if '*' in ratings_path:
-          ratings_pl = pl.read_parquet(ratings_path, glob=True)
-        else:
-          ratings_pl = pl.read_parquet(ratings_path)
-        if combined is None:
-          combined = ratings_pl
-        else:
-          combined = combined.vstack(ratings_pl)
-    return combined
-    
-  def _create_user_embeddings(inputs: Union[Dict[str, np.ndarray], List[bytes]], loaded_user_movie_model) -> np.ndarray:
+  def _create_user_embeddings(inputs: Union[Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]],
+    loaded_user_movie_model) -> tf.Tensor:
     """
     given inputs, use the query_candidate model to make embeddings.
     :param inputs: dictionary of inputs where keys must be all columns from the joined ratings file that the models
     were trained upon.  Note that for the user model, only usr_id and age are used, so the other items can be fake.
-    :return: embeddings usable for the vector approx nearest neighbor searches
+    :return: embeddings usable for the vector approx nearest neighbor searches.
+    output format is tensor of shape (len(inputs as a list),)
     """
-    if isinstance(inputs, dict):
-      examples_list = convert_dict_inputs_to_tfexample_ser(inputs)
-    else:
-      examples_list = inputs
+    if not isinstance(inputs, list):
+      inputs = [inputs]
+    examples_list = []
+    for inp_dict in inputs:
+      if not isinstance(inp_dict, dict) or "user_id" not in inp_dict or "age" not in inp_dict:
+        raise ValueError("expecting inputs  to be a dictionary that includes user_id and age or a list of dictionaries including those")
+      examples_list.append(RetrieverAndRanker._create_serialized_tfexample(inp_dict))
     infer = loaded_user_movie_model.signatures["serving_query"]
     INPUT_KEY = list(infer.structured_input_signature[1].keys())[0]
     embeddings_list = infer(**{INPUT_KEY: examples_list})['outputs'] # k X embed_dim
-    #print(f'np.shape(embeddings={np.shape(embeddings_list)})')
-    return np.vstack(embeddings_list)
+    #embeddings_list is a single tensory with a 2D-array of embeddings
+    return embeddings_list
   
-  def _create_movie_embeddings(inputs: Union[Dict[str, np.ndarray], List[bytes]], loaded_user_movie_model) -> np.ndarray:
+  def _create_movie_embeddings(inputs: Union[Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]],
+    loaded_user_movie_model) -> tf.Tensor:
     """
     given inputs, use the serving_candidate model to make embeddings.
     :param inputs: dictionary of inputs where keys must be all columns from the joined ratings file that the models
-    were trained upon.  Note that for the movie model, nly ovie_id and genres are used, so the other items can be fake.
+    were trained upon.  Note that for the movie model, only ovie_id and genres are used, so the other items can be fake.
     :return: embeddings usable for the vector approx nearest neighbor searches
     """
-    if isinstance(inputs, dict):
-      examples_list = convert_dict_inputs_to_tfexample_ser(inputs)
-    else:
-      examples_list = inputs
+    if not isinstance(inputs, list):
+      inputs = [inputs]
+    examples_list = []
+    for inp_dict in inputs:
+      if not isinstance(inp_dict, dict) or "movie_id" not in inp_dict or "genres" not in inp_dict:
+        raise ValueError("expecting inputs  to be a dictionary that includes movie_id and genres or a list of dictionaries including those")
+      examples_list.append(RetrieverAndRanker._create_serialized_tfexample(inp_dict))
     infer = loaded_user_movie_model.signatures["serving_candidate"]
     INPUT_KEY = list(infer.structured_input_signature[1].keys())[0]
     embeddings_list = infer(**{INPUT_KEY: examples_list})['outputs']  # k X embed_dim
-    print(f'np.shape(embeddings={np.shape(embeddings_list)})')
-    return np.vstack(embeddings_list)
+    # embeddings_list is a single tensory with a 2D-array of embeddings
+    return embeddings_list
   
-  def _create_user_indexers(inputs: Union[Dict[str, np.ndarray], List[bytes]], loaded_user_movie_model, max_k:int) -> np.ndarray:
-    """
-    note that the indexes are w.r.t the ordering given in ratings_pl
-    :param ratings_pl:
-    :return:
-    """
-    embeddings_np = RetrieverAndRanker._create_user_embeddings(inputs, loaded_user_movie_model)
-    if RetrieverAndRanker.is_linux:
-      indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings_np, top_k=max_k)
-    else:
-      d = np.shape(embeddings_np)[1]
-      indexer = RetrieverAndRanker.build_faiss_index(embeddings=embeddings_np, dimension=d)
-    return indexer
+  @tf.function
+  def _get_all_ids_as_tensor(ds):
+    initial_state = tf.constant([], dtype=tf.int64)
+    def reduce_fn(previous_tensor, current_element):
+      return tf.concat([previous_tensor,
+        tf.expand_dims(current_element, axis=0)], axis=0)
+    all_ids_tensor = ds.reduce(initial_state=initial_state,
+      reduce_func=reduce_fn)
+    return all_ids_tensor
+  
+  def _create_user_indexers(users_path:str, loaded_user_movie_model,
+    feature_spec:dict, max_k:int):
+    #-> Tuple[scann.ScannSearcher, List[int]]:
+
+    _ct = "GZIP" if users_path.endswith(".gz") else None
+    file_paths = glob.glob(users_path)
+    ds_ser = tf.data.TFRecordDataset(file_paths, compression_type=_ct)
+    query_model = loaded_user_movie_model.signatures["serving_query"]
+    INPUT_KEY = list(query_model.structured_input_signature[1].keys())[0]
+    embeddings = []
+    for batch in ds_ser.batch(256):
+      emb = query_model(**{INPUT_KEY: batch})['outputs']  # k X embed_dim
+      embeddings.append(emb)
+    embeddings = tf.concat(embeddings, 0)
+
+    indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings, top_k=max_k)
+    
+    n_users = 0
+    def parse_tf_example(example_proto, feature_spec):
+      row = tf.io.parse_single_example(example_proto, feature_spec)
+      return row['user_id']
+    ds_ids = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+    all_ids_tensor = RetrieverAndRanker._get_all_ids_as_tensor(ds_ids)
+    ids = all_ids_tensor.numpy().tolist()
+
+    return indexer, ids
 
   def is_user_known(self, user_id):
     return user_id in self.user_bloom_filter
   
   def has_seen_movie(self, user_id, movie_id):
-    return (user_id << self.shift_bytes) + movie_id in self.user_movie_bloom_filter
+    return (user_id << self.shift_bits) + movie_id in self.user_movie_bloom_filter
 
-  #def get_predictions(self, data):
-  #  pass
-  
-  def fill_missing_cols_with_fake(inp_dict:Dict[str, Union[int, bytes]]):
-    """populate an inputs dictionary for a model signature needing the joined raw file columns"""
-    for key in inp_dict:
-      n = len(inp_dict[key])
-      break
-    for key in ["movie_id", "user_id", "age", "occupation"]:
-      if key not in inp_dict:
-        inp_dict[key] = np.array([[0] for _ in range(n)])
-    if "gender" not in inp_dict:
-      inp_dict['gender'] = np.random.choice(np.array([b'M', b'F']), size=n, replace=True)
-      inp_dict['gender'] = inp_dict['gender'].reshape(-1, 1)
-    if "timestamp" not in inp_dict:
-      inp_dict['timestamp'] = np.array([[966606623] for _ in range(n)])
-    if "genres" not in inp_dict:
-      inp_dict['genres'] = np.array([[b'Drama'] for _ in range(n)])
-
-  def get_users_given_users(self, user_data_dict:Dict[str, Union[int, bytes]], top_k:int):
-    #to find similar users requires all ratings_joined columns, but only the user_id and age are used for latest model.
-    # TODO: the best hyperparams for a model need to be read by this class and used where needed.
-    #vector search for similar users.  then find similar movies, then use ranking, sort and return top_k
-    RetrieverAndRanker.fill_missing_cols_with_fake(user_data_dict)
-    # TODO: create user embeddings
-    # TODO: find top_k similar users for each row in user_data_dict
-    user_embeddings = RetrieverAndRanker._create_user_embeddings(user_data_dict, self.loaded_user_movie_model)
-    if RetrieverAndRanker.is_linux:
-      #indexes are insert order indexes
-      neighbor_idxs, distances = self.user_indexers.search_batched(user_embeddings, top_k=top_k)
-    else:
-      distances, neighbor_idxs = self.user_indexers.search(user_embeddings, top_k)
+  def get_users_given_users(self, user_data_dict:Union[
+    Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]], top_k:int):
+    
+    embeddings_tensor = RetrieverAndRanker._create_user_embeddings(user_data_dict)
+    
+    #are these tensors or numpy?
+    neighbor_idxs, distances = self.user_indexers.search_batched(embeddings_tensor, top_k)
     nearest_user_ids = [[self.user_ids[i] for i in _list] for _list in neighbor_idxs]
     return nearest_user_ids
   
@@ -330,9 +348,10 @@ class RetrieverAndRanker:
     movie_embeddings = RetrieverAndRanker._create_movieembeddings(movie_data_dict, self.loaded_user_movie_model)
     if RetrieverAndRanker.is_linux:
       #indexes are insert order indexes
-      neighbor_idxs, distances = self.movie_indexers.search_batched(movie_embeddings, top_k=top_k)
+      neighbor_idxs, distances = self.movie_indexers.search_batched(movie_embeddings, top_k)
     else:
       distances, neighbor_idxs = self.movie_indexers.search(movie_embeddings, top_k)
+    #results are both np.ndarray
     nearest_user_ids = [[self.movie_ids[i] for i in _list] for _list in neighbor_idxs]
     return nearest_user_ids
   
@@ -357,3 +376,15 @@ class RetrieverAndRanker:
       distances, neighbor_idxs = self.movie_indexers.search(user_embeddings, top_k)
     nearest_user_ids = [[self.movie_ids[i] for i in _list] for _list in neighbor_idxs]
     return nearest_user_ids
+  
+  @classmethod
+  def _parse_pbtxt_file(cls, schema_uri, message):
+    try:
+      with tf.io.gfile.GFile(schema_uri, 'r') as f:
+        contents = f.read()
+    except tf.errors.NotFoundError:
+      print(f"Error: File not found at {schema_uri}")
+    except Exception as e:
+      print(f"An error occurred: {e}")
+    text_format.Parse(contents, message)
+    return message

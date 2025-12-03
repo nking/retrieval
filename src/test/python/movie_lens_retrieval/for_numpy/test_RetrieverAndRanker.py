@@ -126,7 +126,7 @@ class TestRetrieval(TestCase):
     self.assertEqual(len(ranked), max_k)
     
   def test__init_rbloom(self):
-    shift_bytes = 13
+    shift_bits = 13
     file_paths = [os.path.join(get_project_dir(),
       "src/test/resources/data/sorted_1/sorted_1/ratings_sorted_1_joined*parquet"),
       os.path.join(get_project_dir(),
@@ -136,7 +136,7 @@ class TestRetrieval(TestCase):
     
     max_user_id = ratings_pl_1["user_id"].max()
     
-    user_bloom_filter, user_movie_bloom_filter = RetrieverAndRanker._init_rbloom(ratings_pl_1, shift_bytes)
+    user_bloom_filter, user_movie_bloom_filter = RetrieverAndRanker._init_rbloom(ratings_pl_1, shift_bits)
     
     #test that all out-of-vocabulary user_ids are not in bloom filter
     n_false_u = 0
@@ -165,7 +165,7 @@ class TestRetrieval(TestCase):
       row = ratings_pl_1.row(np.random.randint(1, n))
       user_id = row[user_idx]
       movie_id = row[movie_idx]
-      encoded = (user_id << shift_bytes) + movie_id
+      encoded = (user_id << shift_bits) + movie_id
       if encoded not in user_movie_bloom_filter:
         n_false_um += 1
       if user_id not in user_bloom_filter:

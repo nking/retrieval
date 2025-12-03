@@ -58,10 +58,13 @@ class RetrieverAndRanker:
       "genres" : tf.io.FixedLenFeature([], tf.string)}
     
     # create indexes using saved_models
-    # longest step in computations:
-    self.user_indexers, self.user_ids_ds = RetrieverAndRanker._create_user_indexers(users_path,
+    # longest step in computations because it reads out entire datasets.
+    # the user_ids are needed to lookup the ids from indexes from search results, though, the movie_lens datasets
+    # were created so that these inputs are sequential and start at 1, so the scann indexes returned are the true ids - 1,
+    #  and so reading out the user_ids and movie_ids can be excluded to speed up RetrieverAndRanker construction.
+    self.user_indexers, self.user_ids = RetrieverAndRanker._create_user_indexers(users_path,
       self.loaded_user_movie_model, self.feature_spec, self.max_k)
-    self.movie_indexers, self.movie_ids_ds = RetrieverAndRanker._create_movie_indexers(movies_path,
+    self.movie_indexers, self.movie_ids = RetrieverAndRanker._create_movie_indexers(movies_path,
       self.loaded_user_movie_model, self.feature_spec, self.max_k)
     
     pivot_feature_spec = {
@@ -74,9 +77,9 @@ class RetrieverAndRanker:
     if movie_pivot_pred_col_name is None:
       pivot_feature_spec[movie_pivot_pred_col_name] = tf.io.FixedLenFeature([], tf.int64)
     
-    # adds column "predicted_from_genres"
-    self.cold_start_rankings = self._prep_cold_start_rankings(movie_pivot_path, pivot_feature_spec,
-      movie_pivot_pred_col_name, self.max_k)
+    self.cold_start_rankings = self._prep_cold_start_rankings(movies_pivot_path=movie_pivot_path,
+      feature_spec=pivot_feature_spec,
+      prior_rating_column_name=movie_pivot_pred_col_name, max_k=self.max_k)
     
     #the ratings_ds is largest to load.
     # it is used for the user_mode bloom filter to check whether user has not seen movie
@@ -85,7 +88,7 @@ class RetrieverAndRanker:
 
     #using rbloom filters for less memory than tf.lookup.StaticHashTable.  would need to be reconsidered for cloud infrastruture
     self.shift_bits = 13
-    self.user_bloom_filter, self.user_movie_bloom_filter = RetrieverAndRanker._init_rbloom(self.user_ids_ds,
+    self.user_bloom_filter, self.user_movie_bloom_filter = RetrieverAndRanker._init_rbloom(self.user_ids,
         ratings_ds, self.shift_bits)
         
   def _joined_ratings_tt_to_ds(file_path_globs:List[str], feature_spec:dict, batch_size:int=256):
@@ -113,8 +116,21 @@ class RetrieverAndRanker:
     return dataset
   
   def _create_movie_indexers(movies_path: str,
-    loaded_user_movie_model, feature_spec:dict, max_k:int):
-    #-> Tuple[scann.ScannSearcher, List[int]]:
+    loaded_user_movie_model, feature_spec:dict, max_k:int) -> Tuple[scann.scann_ops_pybind.ScannSearcher, List[int]]:
+    """
+    given the glob file pattern for the movies file path, create a ScANN searcher instance
+    with embeddings from the model and input files.
+    
+    :param movies_path: the file path pattern to the TFRecords holding all movies in the format
+      of the joined ratings tfrecords.  the movie_id and genres columns are the only used here though.
+    :param loaded_user_movie_model: the saved_model that will be used to extract the "serving_query"
+    signature
+    :param feature_spec: the feature scpe needed to deserialize the tfrecord serialized strings into
+    a dataset of dictionary of tensors.
+    :param max_k: the maximum number of items that will be possible to return from a search of the
+    resulting seracher.
+    :return: an instance of ScANN searcher loaded with embedding made from the TFRecords at movies_path
+    """
     
     _ct = "GZIP" if movies_path.endswith(".gz") else None
     file_paths = glob.glob(movies_path)
@@ -132,8 +148,10 @@ class RetrieverAndRanker:
 
     def parse_tf_example(example_proto, feature_spec):
       row = tf.io.parse_single_example(example_proto, feature_spec)
-      return row['movie_id'].numpy()
-    ids = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+      return row['movie_id']
+    ds_ids = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+    all_ids_tensor = RetrieverAndRanker._get_all_ids_as_tensor(ds_ids)
+    ids = all_ids_tensor.numpy().tolist()
 
     return indexer, ids
 
@@ -314,7 +332,6 @@ class RetrieverAndRanker:
 
     indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings, top_k=max_k)
     
-    n_users = 0
     def parse_tf_example(example_proto, feature_spec):
       row = tf.io.parse_single_example(example_proto, feature_spec)
       return row['user_id']

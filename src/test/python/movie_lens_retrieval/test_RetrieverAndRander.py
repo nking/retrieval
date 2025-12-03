@@ -60,9 +60,13 @@ class TestBayesianShrinkageEstimator(unittest.TestCase):
     ratings_ds = RetrieverAndRanker._joined_ratings_tt_to_ds(self.joined_ratings_tf_records,
       self.feature_spec, batch_size=2048)
     
-    ubf = RetrieverAndRanker._init_rbloom(user_ids, ratings_ds, bits_shift= 13)
+    shift_bits = 13
+    ubf, umbf = RetrieverAndRanker._init_rbloom(user_ids, ratings_ds, bits_shift=shift_bits)
     
-    #self.assertTrue(1 in ubf)
+    self.assertTrue(1 in ubf)
+    
+    #known user, movie rating pair
+    self.assertTrue((6040 << shift_bits)+858 in umbf)
     
   if __name__ == '__main__':
     unittest.main()

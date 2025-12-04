@@ -1,5 +1,6 @@
 from typing import Union, List, Dict, Tuple, Any
 import tensorflow as tf
+from rbloom import Bloom
 from google.protobuf import text_format
 import random
 import glob
@@ -11,6 +12,12 @@ logging.set_stderrthreshold(logging.WARNING)
 import scann
 
 """
+This is a version containing a Bloom Filter.  It's not ideal as the Blloom Filter should be
+a separate component outside of the Retrieval.  Kept it for an all-in-one toy, but the
+use of it in whether a user has already seen a movie of not has to be further looked into
+as the false positive rate is higher than expected..
+
+
 NOTE that data should only contain data up to and including training data and eval data. no test
 data should be included.
 
@@ -18,54 +25,27 @@ TODO: should use MLMD and model lineage for the saved_models and data and schema
 
 TODO: add cloud config options as needed and adapt as needed for hosted models
 
-For cloud based RetrieverAndRanker, can adapt for services for ScANN.
-
-Bloom filters r efficient database and cache system can be used outside of this component to:
-(1) check if user exists, and if not, get cold start ratings from this component.
-(2) check if user has already seen movies returned by this component.
-
-Note that this component assumes that the files at users_path and movies_path have entries with ids
-ordered from 1 to the number of entries.  The assumption is used when returning results from the
-ScANN searcher.  For example, when idx = 0 is returned form the movese searcher, then index returned
-by this component is idx+1 = 1.
+For cloud based RetrieverAndRanker, can adapt for services for ScANN and bloom filters.
 """
 
 class RetrieverAndRanker:
   
   def __init__(self, user_movie_saved_model_dir:str,
-    movies_path: str,  users_path:str,
+    movies_path: str,  users_path:str, ratings_paths:list[str],
     movies_pivot_path:str, max_k: int = 1000,
-    movies_batch_size:int=256, users_batch_size:int=256
+    movies_batch_size:int=256, users_batch_size:int=256, ratings_batch_size:int=256
     ):
     """
     param user_movie_saved_model_dir: path to the saved_model directory for the main user_movie model.
         the embeddings model signatures are in this.
-        
-    :param movies_path: glob pattern to the TFRecords of the movies, where the columns are expected to be
-    the same as the joined ratings column, even though only the movie_id and genres columns are used.
-    Also, the movie_ids are expected to start at 1 and end at the number of movies.  Any book-keeping of that
-    is outside this component RetrieverAndRanker.
-    NOTE that the code could be easily altered to return the index of the movies files instead and that number
-    would be 1 less than what is currently returned.
-    
-    :param users_path: glob pattern to the TFRecords of the users, where the columns are expected to be
-    the same as the joined ratings column, even though only the user_id and age columns are used.
-    Also, the user_ids are expected to start at 1 and end at the number of users.  Any book-keeping of that
-    is outside this component RetrieverAndRanker.
-    NOTE that the code could be easily altered to return the index of the users files instead and that number
-    would be 1 less than what is currently returned.
-    
-    :param movie_pivot_path: glob pattern to the TFRecord of the pivot file contianining the movie_ids ordered by
-    the weighted Bayesian shrinkage estimates from using the metadata model as a prior.
-    
-    :param max_k: the maximum number of embeddings to return from a ScANN embedding search.  This should be higher
-    than the top_k desired to account for later removing movies already seen.  The default is 1000.
-    
-    :param movies_batch_size: a batch size to use when creating embeddings when initializing the candidate ScANN searcher.
-    The default is 256.
-    
-    :param ratings_batch_size: a batch size to use when creating embedding when initializing the query ScANN searcher.
-    The default is 256.
+    :param movies_path:
+    :param users_path:
+    :param ratings_paths:
+    :param movie_pivot_path:
+    :param movie_pivot_pred_col_name:
+    :param max_k:
+    :param movies_batch_size:
+    :param ratings_batch_size:
     """
     
     self.max_k = max_k
@@ -83,10 +63,15 @@ class RetrieverAndRanker:
       "occupation" : tf.io.FixedLenFeature([], tf.int64),
       "genres" : tf.io.FixedLenFeature([], tf.string)}
     
-    self.user_indexers = RetrieverAndRanker._create_user_indexer(users_path,
-                                                                 self.loaded_user_movie_model, self.max_k, batch_size=users_batch_size)
-    self.movie_indexers = RetrieverAndRanker._create_movie_indexers(movies_path,
-      self.loaded_user_movie_model, self.max_k, batch_size=movies_batch_size)
+    # create indexes using saved_models
+    # longest step in computations because it reads out entire datasets.
+    # the user_ids are needed to lookup the ids from indexes from search results, though, the movie_lens datasets
+    # were created so that these inputs are sequential and start at 1, so the scann indexes returned are the true ids - 1,
+    #  and so reading out the user_ids and movie_ids can be excluded to speed up RetrieverAndRanker construction.
+    self.user_indexers, self.user_ids = RetrieverAndRanker._create_user_indexers(users_path,
+      self.loaded_user_movie_model, self.feature_spec, self.max_k, batch_size=users_batch_size)
+    self.movie_indexers, self.movie_ids = RetrieverAndRanker._create_movie_indexers(movies_path,
+      self.loaded_user_movie_model, self.feature_spec, self.max_k, batch_size=movies_batch_size)
     
     pivot_feature_spec = {
       "movie_id":tf.io.FixedLenFeature([], tf.int64),
@@ -103,9 +88,43 @@ class RetrieverAndRanker:
       movies_pivot_path=movies_pivot_path,
       feature_spec=pivot_feature_spec,
       max_k=self.max_k)
+    
+    #the ratings_ds is largest to load.
+    # it is used for the user_mode bloom filter to check whether user has not seen movie
+    ratings_ds = RetrieverAndRanker._joined_ratings_tt_to_ds(ratings_paths, self.feature_spec,
+      batch_size=2048)
 
+    #using rbloom filters for less memory than tf.lookup.StaticHashTable.  would need to be reconsidered for cloud infrastruture
+    self.shift_bits = 13
+    self.user_bloom_filter, self.user_movie_bloom_filter = RetrieverAndRanker._init_rbloom(self.user_ids,
+        ratings_ds, self.shift_bits)
+        
+  def _joined_ratings_tt_to_ds(file_path_globs:List[str], feature_spec:dict, batch_size:int=256):
+    GLOB_PATTERNS = file_path_globs
+    GZIP_PATTERN = r".*\.gz$"
+    def load_tfrecords(filepath):
+      """Creates a TFRecordDataset, setting compression based on the file path."""
+      is_compressed = tf.strings.regex_full_match(filepath, GZIP_PATTERN)
+      compression_type = tf.where(is_compressed, tf.constant("GZIP"), tf.constant(""))
+      return tf.data.TFRecordDataset(filepath, compression_type=compression_type)
+    
+    files_dataset = tf.data.Dataset.list_files(GLOB_PATTERNS, shuffle=False)
+    
+    records_dataset = files_dataset.interleave(
+      load_tfrecords, cycle_length=tf.data.AUTOTUNE,  block_length=1,
+      num_parallel_calls=tf.data.AUTOTUNE)
+    
+    def parse_tf_example(example_proto, feature_spec):
+      return tf.io.parse_single_example(example_proto, feature_spec)
+    
+    dataset = (records_dataset
+      .map(lambda x: parse_tf_example(x, feature_spec)).cache()
+      .batch(batch_size).prefetch(tf.data.AUTOTUNE))
+    
+    return dataset
+  
   def _create_movie_indexers(movies_path: str,
-    loaded_user_movie_model, max_k:int, batch_size:int=256) -> scann.scann_ops_pybind.ScannSearcher:
+    loaded_user_movie_model, feature_spec:dict, max_k:int, batch_size:int=256) -> Tuple[scann.scann_ops_pybind.ScannSearcher, List[int]]:
     """
     given the glob file pattern for the movies file path, create a ScANN searcher instance
     with embeddings from the model and input files.
@@ -135,7 +154,32 @@ class RetrieverAndRanker:
 
     indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings, top_k=max_k)
 
-    return indexer
+    def parse_tf_example(example_proto, feature_spec):
+      row = tf.io.parse_single_example(example_proto, feature_spec)
+      return row['movie_id']
+    ds_ids = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+    all_ids_tensor = RetrieverAndRanker._get_all_ids_as_tensor(ds_ids)
+    ids = all_ids_tensor.numpy().tolist()
+
+    return indexer, ids
+
+  def _init_rbloom(user_ids: List[int], ratings_ds: tf.data.Dataset, bits_shift:int=13) -> Tuple[Bloom, Bloom]:
+    
+    # 12 MB memory?
+    u_bf = Bloom(5*len(user_ids), 0.01)
+    u_bf.update(user_ids)
+      
+    # 17 MB memory for 0.001?
+    n_ratings = ratings_ds.reduce(0, lambda x, _: x + 1).numpy()
+    
+    um_bf = Bloom(2*n_ratings, 0.00001)
+    #TODO: consider batching:
+    for batch in ratings_ds:
+      user_idx = batch['user_id'].numpy()
+      movie_idx = batch['movie_id'].numpy()
+      um_bf.update((user_idx << bits_shift) + movie_idx)
+      
+    return u_bf, um_bf
  
   def _prep_cold_start_rankings(movies_pivot_path:str, feature_spec:Dict[str, Any], max_k:int=1000,
     batch_size:int=256):
@@ -154,7 +198,7 @@ class RetrieverAndRanker:
     for x in pivot_ds.batch(batch_size):
       if i >= max_k:
         break
-      m = x['movie_id'].numpy().tolist()
+      m = x['movie_id'].numpy()
       movie_ids.extend(m)
       i += len(m)
     return movie_ids
@@ -227,9 +271,6 @@ class RetrieverAndRanker:
     searcher = bind1.score_brute_force(quantize=False).build()
     return searcher
   
-  def get_cold_start_movie_recommendations(self, top_k: int = 100):
-    return self.cold_start_rankings[:top_k].copy()
-  
   def _create_user_embeddings(inputs: Union[Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]],
     loaded_user_movie_model) -> tf.Tensor:
     """
@@ -283,8 +324,8 @@ class RetrieverAndRanker:
       reduce_func=reduce_fn)
     return all_ids_tensor
   
-  def _create_user_indexer(users_path:str, loaded_user_movie_model,
-    max_k:int, batch_size:int=256):
+  def _create_user_indexers(users_path:str, loaded_user_movie_model,
+    feature_spec:dict, max_k:int, batch_size:int=256):
     #-> Tuple[scann.ScannSearcher, List[int]]:
 
     _ct = "GZIP" if users_path.endswith(".gz") else None
@@ -300,7 +341,20 @@ class RetrieverAndRanker:
 
     indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings, top_k=max_k)
     
-    return indexer
+    def parse_tf_example(example_proto, feature_spec):
+      row = tf.io.parse_single_example(example_proto, feature_spec)
+      return row['user_id']
+    ds_ids = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+    all_ids_tensor = RetrieverAndRanker._get_all_ids_as_tensor(ds_ids)
+    ids = all_ids_tensor.numpy().tolist()
+
+    return indexer, ids
+
+  def is_user_known(self, user_id):
+    return user_id in self.user_bloom_filter
+  
+  def has_seen_movie(self, user_id, movie_id):
+    return ((user_id << self.shift_bits) + movie_id) in self.user_movie_bloom_filter
 
   def get_users_given_users(self, user_data_dict:Union[
     Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]], top_k:int):
@@ -310,8 +364,8 @@ class RetrieverAndRanker:
       top_k = self.max_k
     embeddings_tensor = RetrieverAndRanker._create_user_embeddings(user_data_dict, self.loaded_user_movie_model)
     neighbor_idxs, distances = self.user_indexers.search_batched(embeddings_tensor, top_k)
-    #returns numpy ndarrays.  add 1 to id for offset mentioned in constructor.
-    nearest_user_ids = [[int(idx + 1) for idx in _list] for _list in neighbor_idxs]
+    #returns numpy ndarrays
+    nearest_user_ids = [[self.user_ids[i] for i in _list] for _list in neighbor_idxs]
     if not isinstance(user_data_dict, list):
       user_data_dict = [user_data_dict]
     for input_dict, movie_ids in zip(user_data_dict, nearest_user_ids):
@@ -330,8 +384,7 @@ class RetrieverAndRanker:
     
     movie_embeddings = RetrieverAndRanker._create_movie_embeddings(movie_data_dict, self.loaded_user_movie_model)
     neighbor_idxs, distances = self.movie_indexers.search_batched(movie_embeddings, top_k)
-    # add 1 to id for offset mentioned in constructor.
-    nearest_movie_ids = [[int(idx +1) for idx in _list] for _list in neighbor_idxs]
+    nearest_movie_ids = [[self.movie_ids[i] for i in _list] for _list in neighbor_idxs]
     if not isinstance(movie_data_dict, list):
       movie_data_dict = [movie_data_dict]
     for input_dict, movie_ids in zip(movie_data_dict, nearest_movie_ids):
@@ -348,19 +401,44 @@ class RetrieverAndRanker:
       top_k = self.max_k
     movie_embeddings = RetrieverAndRanker._create_movie_embeddings(movie_data_dict, self.loaded_user_movie_model)
     neighbor_idxs, distances = self.user_indexers.search_batched(movie_embeddings, top_k)
-    # add 1 to id for offset mentioned in constructor.
-    nearest_user_ids = [[int(i +1) for i in _list] for _list in neighbor_idxs]
+    nearest_user_ids = [[self.user_ids[i] for i in _list] for _list in neighbor_idxs]
     return nearest_user_ids
 
   def get_movies_given_users(self, user_data_dict:Union[Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]],
-    top_k:int):
+    top_k:int, remove_aready_seen:bool=True):
     if top_k < 1:
       raise ValueError('top_k must be >= 1')
     if top_k > self.max_k:
       top_k = self.max_k
     user_embeddings = RetrieverAndRanker._create_user_embeddings(user_data_dict, self.loaded_user_movie_model)
-    neighbor_idxs, distances = self.movie_indexers.search_batched(user_embeddings, top_k)
-    # add 1 to id for offset mentioned in constructor.
-    nearest_movie_ids = [[int(i +1) for i in _list] for _list in neighbor_idxs]
+    #choose more than top_k because we will filter to remove already seen
+    k = min(top_k*1000, self.max_k) if remove_aready_seen else top_k
+    neighbor_idxs, distances = self.movie_indexers.search_batched(user_embeddings, k)
+    nearest_movie_ids = [[self.movie_ids[i] for i in _list] for _list in neighbor_idxs]
+    if remove_aready_seen:
+      if not isinstance(user_data_dict, list):
+        user_data_dict = [user_data_dict]
+      tmp_list = []
+      for input_dict, movie_ids in zip(user_data_dict, nearest_movie_ids):
+        user_id = int(input_dict['user_id'])
+        tmp_i = []
+        for movie_id in movie_ids:
+          if len(tmp_i) == top_k:
+            break
+          if not self.has_seen_movie(user_id, movie_id):
+            tmp_i.append(movie_id)
+        tmp_list.append(tmp_i)
+      nearest_movie_ids = tmp_list
     return nearest_movie_ids
   
+  @classmethod
+  def _parse_pbtxt_file(cls, schema_uri, message):
+    try:
+      with tf.io.gfile.GFile(schema_uri, 'r') as f:
+        contents = f.read()
+    except tf.errors.NotFoundError:
+      print(f"Error: File not found at {schema_uri}")
+    except Exception as e:
+      print(f"An error occurred: {e}")
+    text_format.Parse(contents, message)
+    return message

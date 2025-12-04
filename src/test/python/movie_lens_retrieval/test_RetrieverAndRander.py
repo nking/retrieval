@@ -1,18 +1,27 @@
+import os.path
 import unittest
 
 import tensorflow as tf
 from helper import *
 from movie_lens_retrieval.RetrieverAndRanker import RetrieverAndRanker
 
-class TestBayesianShrinkageEstimator(unittest.TestCase):
+class TestRetrievalAndRanker(unittest.TestCase):
   def setUp(self):
+    
     self.joined_ratings_tf_records = [os.path.join(get_project_dir(),
       "src/test/resources/data/sorted_1/tfrecord-*.gz"),
       os.path.join(get_project_dir(),"src/test/resources/data/sorted_2/tfrecord*.gz"),]
+    
     saved_models_dir = os.path.join(get_project_dir(), "src/main/resources/serving_models")
     self.user_movie_models_dir = os.path.join(saved_models_dir, "user_movie_model")
+    
+    self.movie_inputs = os.path.join(get_project_dir(),
+      "src/test/resources/data/movie_emb_inp/tfrecord*.gz")
     self.user_inputs = os.path.join(get_project_dir(),
       "src/test/resources/data/user_emb_inp/tfrecord*.gz")
+    self.movies_predictions_pivot = os.path.join(get_project_dir(),
+      "src/test/resources/data/ratings_and_predictions_pivot/tfrecord*.gz")
+    self.movies_predictions_pivot_prior_col_name = "weighted_rating"
     self.feature_spec = {"user_id": tf.io.FixedLenFeature([], tf.int64),
       "movie_id":tf.io.FixedLenFeature([], tf.int64),
       "rating" : tf.io.FixedLenFeature([], tf.int64),
@@ -50,7 +59,7 @@ class TestBayesianShrinkageEstimator(unittest.TestCase):
       self.assertTrue(0 in a)
       self.assertTrue(1 in a)
     
-  def test_bloom_filters(self):
+  def _est_bloom_filters(self):
     
     loaded_model = tf.saved_model.load(self.user_movie_models_dir)
     
@@ -67,6 +76,34 @@ class TestBayesianShrinkageEstimator(unittest.TestCase):
     
     #known user, movie rating pair
     self.assertTrue((6040 << shift_bits)+858 in umbf)
+    
+  def test_retrieval(self):
+    
+    rr = RetrieverAndRanker(user_movie_saved_model_dir = self.user_movie_models_dir,
+                            movies_path = self.movie_inputs, users_path=self.user_inputs,
+                            ratings_paths = self.joined_ratings_tf_records,
+                            movies_pivot_path=self.movies_predictions_pivot,
+                            max_k= 1000, movies_batch_size=256, ratings_batch_size=256)
+    
+    self.assertTrue(rr.is_user_known(1))
+    self.assertTrue(rr.has_seen_movie(6040, 858))
+    
+    #who are the users similar to user_id=1
+    user_inp = {'user_id': 5077, 'age':25}
+    sim_users = rr.get_users_given_users(user_inp, top_k=9)
+    print(f'sim_users: {sim_users}')
+    #1587, 2059, 5684, 1859, 4899, 5217, 3468, 2345, 3040
+    
+    sim_movies = rr.get_movies_given_users(user_inp, top_k=9, remove_aready_seen=True)
+    print(f'sim_movies: {sim_movies}')
+    #3089, 1572, 3030, 1068, 2731, 326, 1759, 3134, 2575, 2940
+    
+    movie_inp = {'movie_id': 1068, 'genres': 'Crime|Film-Noir'}
+    sim_users = rr.get_users_given_movies(movie_inp, top_k=9)
+    print(f'sim_users: {sim_users}')
+    
+    sim_movies = rr.get_movies_given_movies(movie_inp, top_k=9)
+    print(f'sim_movies: {sim_movies}')
     
   if __name__ == '__main__':
     unittest.main()

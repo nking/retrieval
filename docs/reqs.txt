@@ -4,15 +4,15 @@ the class should be able to:
   - use the two-tower saved model signatures from the
     project https://github.com/nking/recommender_systems.git
     to encode user queries and candidate movie queries
-    and predict ratings.
-  - given a user entry with fake rating (==target == label),
+    and get similar recommendations.
+  - given a user entry:
     - return similar users
     - return similar movies
-    - return whether user is definitely not 
-      or probably is in the DB
-      - implemented with Bloom Filter or efficient equivalent
+    - return whether user is not indexed
   - given a movie entry
     - return similar movies
     - return similar users
   - handle cold starts with weighted Bayesian average.
+  - given a user and recommended movies, predict
+    the ratings and sort the results for the user.
 

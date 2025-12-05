@@ -20,9 +20,8 @@ TODO: add cloud config options as needed and adapt as needed for hosted models
 
 For cloud based RetrieverAndRanker, can adapt for services for ScANN.
 
-Bloom filters r efficient database and cache system can be used outside of this component to:
-(1) check if user exists, and if not, get cold start ratings from this component.
-(2) check if user has already seen movies returned by this component.
+Bloom filters or efficient database and cache system can be used outside of this component to:
+(1) check if user has already seen movies returned by this component.
 
 """
 
@@ -92,7 +91,7 @@ class RetrieverAndRanker:
       movies_pivot_path=movies_pivot_path,
       feature_spec=pivot_feature_spec,
       max_k=self.max_k)
-
+    
   def _create_movie_indexer(self, movies_path: str,
     loaded_user_movie_model, max_k:int, batch_size:int=256) \
     -> Tuple[scann.scann_ops_pybind.ScannSearcher, tf.lookup.StaticHashTable]:
@@ -379,3 +378,7 @@ class RetrieverAndRanker:
   def is_user_known(self, user_id) -> bool:
     id = self.users_ht.lookup(tf.constant(user_id, dtype=tf.int64))
     return False if id == -1 else True
+  
+  def get_ratings(self, user_data_dict: Union[
+    Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]]):
+    raise NotImplementedError("not yet implemented")

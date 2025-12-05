@@ -1,9 +1,37 @@
 # retrieval
-Retrieval class to use encoders from
-the saved_model built in the recommenders_systems
-project at
+project to retrieve and rank recommendations, built
+upon models and data written from the project:
 https://github.com/nking/recommender_systems.git
 
-set up a virtual environment
+instructions:
+  set up a virtual environment using conda or virtualenv
+  with a python version that is >= 3.10.0
+  
+  activate the virtual environment
 
-pip install --editable .
+  to install the dependencies, the easiest way is to
+  install this project:
+    pip install --editable .
+  else you can find the required libraries in pyproject.toml
+  or setup.py
+
+  the unit tests show how to run the code.
+
+Local testing:
+
+  pycharm:
+
+    using right click menu, mark the source tree directory:
+      src/main/python
+
+    using right click menu, mark the test tree directory:
+      src/test/python/movie_lens_retrieval
+
+    then pycharm tests will correctly resolve paths.
+
+  bash or other shell environment:
+
+    python and pytest can be used from the project's base
+    directory
+  
+

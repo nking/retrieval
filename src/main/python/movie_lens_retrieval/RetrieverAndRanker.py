@@ -24,10 +24,6 @@ Bloom filters r efficient database and cache system can be used outside of this 
 (1) check if user exists, and if not, get cold start ratings from this component.
 (2) check if user has already seen movies returned by this component.
 
-Note that this component assumes that the files at users_path and movies_path have entries with ids
-ordered from 1 to the number of entries.  The assumption is used when returning results from the
-ScANN searcher.  For example, when idx = 0 is returned form the movese searcher, then index returned
-by this component is idx+1 = 1.
 """
 
 class RetrieverAndRanker:
@@ -43,17 +39,9 @@ class RetrieverAndRanker:
         
     :param movies_path: glob pattern to the TFRecords of the movies, where the columns are expected to be
     the same as the joined ratings column, even though only the movie_id and genres columns are used.
-    Also, the movie_ids are expected to start at 1 and end at the number of movies.  Any book-keeping of that
-    is outside this component RetrieverAndRanker.
-    NOTE that the code could be easily altered to return the index of the movies files instead and that number
-    would be 1 less than what is currently returned.
     
     :param users_path: glob pattern to the TFRecords of the users, where the columns are expected to be
     the same as the joined ratings column, even though only the user_id and age columns are used.
-    Also, the user_ids are expected to start at 1 and end at the number of users.  Any book-keeping of that
-    is outside this component RetrieverAndRanker.
-    NOTE that the code could be easily altered to return the index of the users files instead and that number
-    would be 1 less than what is currently returned.
     
     :param movie_pivot_path: glob pattern to the TFRecord of the pivot file contianining the movie_ids ordered by
     the weighted Bayesian shrinkage estimates from using the metadata model as a prior.
@@ -83,9 +71,9 @@ class RetrieverAndRanker:
       "occupation" : tf.io.FixedLenFeature([], tf.int64),
       "genres" : tf.io.FixedLenFeature([], tf.string)}
     
-    self.user_indexers = RetrieverAndRanker._create_user_indexer(users_path,
-                                                                 self.loaded_user_movie_model, self.max_k, batch_size=users_batch_size)
-    self.movie_indexers = RetrieverAndRanker._create_movie_indexers(movies_path,
+    self.user_indexers, self.users_ht = self._create_user_indexer(users_path,
+      self.loaded_user_movie_model, self.max_k, batch_size=users_batch_size)
+    self.movie_indexers, self.movies_ht = self._create_movie_indexer(movies_path,
       self.loaded_user_movie_model, self.max_k, batch_size=movies_batch_size)
     
     pivot_feature_spec = {
@@ -97,6 +85,7 @@ class RetrieverAndRanker:
       "3" : tf.io.FixedLenFeature([], tf.string),
       "4" : tf.io.FixedLenFeature([], tf.int64),
       "5" : tf.io.FixedLenFeature([], tf.int64)}
+      'prediction_mm', 'total_votes', 'movie_ratings_mean', 'weighted_rating'
     """
 
     self.cold_start_rankings = RetrieverAndRanker._prep_cold_start_rankings(
@@ -104,8 +93,9 @@ class RetrieverAndRanker:
       feature_spec=pivot_feature_spec,
       max_k=self.max_k)
 
-  def _create_movie_indexers(movies_path: str,
-    loaded_user_movie_model, max_k:int, batch_size:int=256) -> scann.scann_ops_pybind.ScannSearcher:
+  def _create_movie_indexer(self, movies_path: str,
+    loaded_user_movie_model, max_k:int, batch_size:int=256) \
+    -> Tuple[scann.scann_ops_pybind.ScannSearcher, tf.lookup.StaticHashTable]:
     """
     given the glob file pattern for the movies file path, create a ScANN searcher instance
     with embeddings from the model and input files.
@@ -135,7 +125,31 @@ class RetrieverAndRanker:
 
     indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings, top_k=max_k)
 
-    return indexer
+    ht = self._create_static_hashtable_for_searcher(ds_ser, "movie_id", batch_size)
+    
+    return indexer, ht
+  
+  def _create_static_hashtable_for_searcher(self, ds_ser:tf.data.Dataset, key:str, batch_size:int=256) \
+    -> tf.lookup.StaticHashTable:
+    
+    feature_spec = {key: tf.io.FixedLenFeature(shape=[], dtype=tf.int64, default_value=None)}
+    def parse_tf_example(example_proto, feature_spec):
+      return tf.io.parse_single_example(example_proto, feature_spec)
+    ds = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+    ids = []
+    i = 0
+    for batch in ds.batch(batch_size):
+      ids.append(batch[key])
+      i += len(batch[key])
+    ids = tf.concat(ids, 0)
+    indexes = tf.constant([idx for idx in range(i)], dtype=tf.int64)
+    ht = tf.lookup.StaticHashTable(
+      tf.lookup.KeyValueTensorInitializer(indexes, ids),
+      default_value=-1
+    )
+    #print(f'[{key}] ht lookup [0,3]={ht.lookup(tf.constant([0,3], dtype=tf.int64))}')
+
+    return ht
  
   def _prep_cold_start_rankings(movies_pivot_path:str, feature_spec:Dict[str, Any], max_k:int=1000,
     batch_size:int=256):
@@ -283,8 +297,8 @@ class RetrieverAndRanker:
       reduce_func=reduce_fn)
     return all_ids_tensor
   
-  def _create_user_indexer(users_path:str, loaded_user_movie_model,
-    max_k:int, batch_size:int=256):
+  def _create_user_indexer(self, users_path:str, loaded_user_movie_model,
+    max_k:int, batch_size:int=256) -> Tuple[scann.scann_ops_pybind.ScannSearcher, tf.lookup.StaticHashTable]:
     #-> Tuple[scann.ScannSearcher, List[int]]:
 
     _ct = "GZIP" if users_path.endswith(".gz") else None
@@ -300,7 +314,9 @@ class RetrieverAndRanker:
 
     indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings, top_k=max_k)
     
-    return indexer
+    ht = self._create_static_hashtable_for_searcher(ds_ser, "user_id", batch_size)
+    
+    return indexer, ht
 
   def get_users_given_users(self, user_data_dict:Union[
     Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]], top_k:int):
@@ -310,8 +326,7 @@ class RetrieverAndRanker:
       top_k = self.max_k
     embeddings_tensor = RetrieverAndRanker._create_user_embeddings(user_data_dict, self.loaded_user_movie_model)
     neighbor_idxs, distances = self.user_indexers.search_batched(embeddings_tensor, top_k)
-    #returns numpy ndarrays.  add 1 to id for offset mentioned in constructor.
-    nearest_user_ids = [[int(idx + 1) for idx in _list] for _list in neighbor_idxs]
+    nearest_user_ids = [[int(idx) for idx in self.users_ht.lookup(tf.constant(_list, dtype=tf.int64)).numpy()] for _list in neighbor_idxs]
     if not isinstance(user_data_dict, list):
       user_data_dict = [user_data_dict]
     for input_dict, movie_ids in zip(user_data_dict, nearest_user_ids):
@@ -330,8 +345,7 @@ class RetrieverAndRanker:
     
     movie_embeddings = RetrieverAndRanker._create_movie_embeddings(movie_data_dict, self.loaded_user_movie_model)
     neighbor_idxs, distances = self.movie_indexers.search_batched(movie_embeddings, top_k)
-    # add 1 to id for offset mentioned in constructor.
-    nearest_movie_ids = [[int(idx +1) for idx in _list] for _list in neighbor_idxs]
+    nearest_movie_ids = [[int(idx) for idx in self.movies_ht.lookup(tf.constant(_list, dtype=tf.int64)).numpy()] for _list in neighbor_idxs]
     if not isinstance(movie_data_dict, list):
       movie_data_dict = [movie_data_dict]
     for input_dict, movie_ids in zip(movie_data_dict, nearest_movie_ids):
@@ -348,8 +362,7 @@ class RetrieverAndRanker:
       top_k = self.max_k
     movie_embeddings = RetrieverAndRanker._create_movie_embeddings(movie_data_dict, self.loaded_user_movie_model)
     neighbor_idxs, distances = self.user_indexers.search_batched(movie_embeddings, top_k)
-    # add 1 to id for offset mentioned in constructor.
-    nearest_user_ids = [[int(i +1) for i in _list] for _list in neighbor_idxs]
+    nearest_user_ids = [[int(idx) for idx in self.users_ht.lookup(tf.constant(_list, dtype=tf.int64)).numpy()] for _list in neighbor_idxs]
     return nearest_user_ids
 
   def get_movies_given_users(self, user_data_dict:Union[Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]],
@@ -360,7 +373,9 @@ class RetrieverAndRanker:
       top_k = self.max_k
     user_embeddings = RetrieverAndRanker._create_user_embeddings(user_data_dict, self.loaded_user_movie_model)
     neighbor_idxs, distances = self.movie_indexers.search_batched(user_embeddings, top_k)
-    # add 1 to id for offset mentioned in constructor.
-    nearest_movie_ids = [[int(i +1) for i in _list] for _list in neighbor_idxs]
+    nearest_movie_ids = [[int(idx) for idx in self.movies_ht.lookup(tf.constant(_list, dtype=tf.int64)).numpy()] for _list in neighbor_idxs]
     return nearest_movie_ids
   
+  def is_user_known(self, user_id) -> bool:
+    id = self.users_ht.lookup(tf.constant(user_id, dtype=tf.int64))
+    return False if id == -1 else True

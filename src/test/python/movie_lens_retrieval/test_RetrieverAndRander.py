@@ -14,8 +14,10 @@ class TestRetrievalAndRanker(unittest.TestCase):
       "src/test/resources/data/movie_emb_inp/tfrecord*.gz")
     self.user_inputs = os.path.join(get_project_dir(),
       "src/test/resources/data/user_emb_inp/tfrecord*.gz")
+    self.movies_mean_ratings_pivot = os.path.join(get_project_dir(),
+      "src/test/resources/data/ratings_and_predictions_pivot/mean_ratings_tfrecord*.gz")
     self.movies_predictions_pivot = os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_and_predictions_pivot/tfrecord*.gz")
+      "src/test/resources/data/ratings_and_predictions_pivot/mm_predictions_tfrecord*.gz")
     self.movies_predictions_pivot_prior_col_name = "weighted_rating"
     self.feature_spec = {"user_id": tf.io.FixedLenFeature([], tf.int64),
       "movie_id":tf.io.FixedLenFeature([], tf.int64),
@@ -58,7 +60,7 @@ class TestRetrievalAndRanker(unittest.TestCase):
     
     rr = RetrieverAndRanker(user_movie_saved_model_dir = self.user_movie_models_dir,
                             movies_path = self.movie_inputs, users_path=self.user_inputs,
-                            movies_pivot_path=self.movies_predictions_pivot,
+                            movies_pivot_path=self.movies_mean_ratings_pivot,
                             max_k= 1000, movies_batch_size=256)
     
     #who are the users similar to user_id=1
@@ -81,5 +83,8 @@ class TestRetrievalAndRanker(unittest.TestCase):
     cold_starts = rr.get_cold_start_movie_recommendations(10)
     print(f'cold_starts: {cold_starts}')
     
+    print(f'is_user_known(1_000_000)={rr.is_user_known(1_000_000)}')
+    print(f'is_user_known(1)={rr.is_user_known(1)}')
+
   if __name__ == '__main__':
     unittest.main()

@@ -172,6 +172,61 @@ class RetrieverAndRanker:
       i += len(m)
     return movie_ids
   
+  def _create_dictionary_of_tensors(self, inputs:List[Dict[str, Union[int, str]]]):
+    """
+    inputs: list of dictionary where each dictionary has form:
+    
+    example inputs:{"user_id":1, "age":25, "movie_id":1, "genres":"Animation|Children's|Comedy"
+    or
+    example inputs:{"user_id":1, "age":25,
+      "movie_id":[1, 3952],
+      "genres":["Animation|Children's|Comedy", "Drama|Thriller"]
+      
+    or list of those
+    
+    :return:
+    """
+    reqs = set(["user_id", "movie_id", "age", "genres"])
+    final_keys = {'user_id': tf.int64, 'movie_id': tf.int64,
+      "timestamp": tf.int64, "gender": tf.string, "age": tf.int64,
+      "occupation": tf.int64, "genres": tf.string}
+
+    for inp_dict in inputs:
+      for key in reqs:
+        if key not in inp_dict:
+          raise ValueError(f"missing required key: {key}")
+    
+    outp_dict = {key: [] for key in final_keys}
+    for inp_dict in inputs:
+      u_id = inp_dict['user_id']
+      age = inp_dict['age']
+      m_id = inp_dict['movie_id']
+      genres = inp_dict['genres']
+      if isinstance(m_id, list) and not isinstance(genres, list) \
+        or isinstance(genres, list) and not isinstance(m_id, list):
+          raise ValueError("genres and m_id must both be lists or scalars")
+      if not isinstance(m_id, list):
+        m_id = [m_id]
+        genres = [genres]
+      for m, g in zip(m_id, genres):
+        outp_dict['user_id'].append([u_id])
+        outp_dict['age'].append([age])
+        outp_dict['movie_id'].append([m])
+        outp_dict['genres'].append([g])
+        for key in final_keys:
+          if key not in reqs:
+            if key in inp_dict:
+              outp_dict[key].append([inp_dict[key]])
+            elif key == "timestamp":
+              outp_dict[key].append([975768870]) #latest time in training dataset
+            elif key == "gender":
+              outp_dict[key].append([random.choice(["M", "F"])])
+            elif key == "occupation":
+              outp_dict[key].append([random.randint(0, 21)])
+    for key in outp_dict:
+      outp_dict[key] = tf.constant(outp_dict[key], dtype=final_keys[key])
+    return outp_dict
+      
   def _create_serialized_tfexample(inputs:Dict[str, Union[int, str]]) -> bytes:
     expected_keys = {'user_id':int, 'movie_id':int, 'rating':int, "timestamp":int,
       "gender":str, "age":int, "occupation":int, "genres":str}
@@ -200,7 +255,7 @@ class RetrieverAndRanker:
           f = tf.train.Feature(float_list=tf.train.FloatList(value=[0.0]))
         elif out_type == int or element_type == bool:
           if out_name == "timestamp":
-            value = 956703932
+            value = 975768870
           else:
             value = 0
           f = tf.train.Feature(
@@ -380,5 +435,38 @@ class RetrieverAndRanker:
     return False if id == -1 else True
   
   def get_ratings(self, user_data_dict: Union[
-    Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]]):
-    raise NotImplementedError("not yet implemented")
+    Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]], as_tensor:bool=False):
+    """
+    given users and movies, return predictions.
+    :param user_data_dict: a dictionary of list of dictionaries containing "user_id", "age",
+    "movie_id" and "genres".  the movie_id and genres can be lists instead of scalars, and
+    if one is a list, the other must be also.
+    
+    example input:{"user_id":1, "age":25, "movie_id":1, "genres":"Animation|Children's|Comedy"
+    
+    example input:{"user_id":1, "age":25,
+      "movie_id":[1, 3952],
+      "genres":["Animation|Children's|Comedy", "Drama|Thriller"]
+
+    :return: list of predictions
+    """
+    if not isinstance(user_data_dict, list):
+      user_data_dict = [user_data_dict]
+    batch = self._create_dictionary_of_tensors(user_data_dict)
+    
+    infer_default_for_dict = self.loaded_user_movie_model.signatures["serving_default_dict"]
+    predictions = infer_default_for_dict(
+      age=batch['age'],
+      gender=batch['gender'],
+      genres=batch['genres'],
+      movie_id=batch['movie_id'],
+      occupation=batch['occupation'],
+      timestamp=batch['timestamp'],
+      user_id=batch['user_id'])
+    tensor_pred = predictions['outputs']
+    
+    if as_tensor:
+      return tensor_pred
+    
+    return tensor_pred.numpy().tolist()
+    

@@ -85,6 +85,16 @@ class TestRetrievalAndRanker(unittest.TestCase):
     
     print(f'is_user_known(1_000_000)={rr.is_user_known(1_000_000)}')
     print(f'is_user_known(1)={rr.is_user_known(1)}')
-
+    
+    #use test data to check recommendations
+    #user_inp = {'user_id': 635, 'age': 56}
+    #sim_users = rr.get_movies_given_users(user_inp, top_k=9)
+    #print(f'sim_users: {sim_users}')
+    # 1587, 2059, 5684, 1859, 4899, 5217, 3468, 2345, 3040
+    user_inp = {'user_id': 635, 'age': 56,
+      'movie_id': [1704, 1940], 'genres': ['Drama', 'Drama']}
+    ratings = rr.get_ratings(user_inp)
+    print(f'ratings: {ratings}')
+    
   if __name__ == '__main__':
     unittest.main()

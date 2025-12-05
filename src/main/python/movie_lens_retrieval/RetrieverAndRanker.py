@@ -339,7 +339,7 @@ class RetrieverAndRanker:
     return self.cold_start_rankings[:top_k].copy()
   
   def _create_user_embeddings(inputs: Union[Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]],
-    loaded_user_movie_model) -> tf.Tensor:
+    loaded_user_movie_model, user_age_hashtable: tf.lookup.StaticHashTable=None) -> tf.Tensor:
     """
     given inputs, use the query_candidate model to make embeddings.
     :param inputs: dictionary of inputs where keys must be all columns from the joined ratings file that the models
@@ -351,8 +351,17 @@ class RetrieverAndRanker:
       inputs = [inputs]
     examples_list = []
     for inp_dict in inputs:
-      if not isinstance(inp_dict, dict) or "user_id" not in inp_dict or "age" not in inp_dict:
-        raise ValueError("expecting inputs  to be a dictionary that includes user_id and age or a list of dictionaries including those")
+      if not isinstance(inp_dict, dict) or "user_id" not in inp_dict:
+        raise ValueError("expecting inputs  to be a dictionary that includes user_id "
+            "or a list of dictionaries containing user_id")
+      user_id = inp_dict["user_id"]
+      if user_age_hashtable and "age" not in inp_dict:
+        age = user_age_hashtable.lookup(tf.constant(user_id, dtype=tf.int64))
+        if age == -1:
+          raise ValueError(f"user_id {user_id} is not registered, and 'age' is missing from inputs")
+        inp_dict["age"] = age.numpy().item()
+      elif "age" not in inp_dict:
+        raise ValueError(f"'age' is missing from inputs")
       examples_list.append(RetrieverAndRanker._create_serialized_tfexample(inp_dict))
     infer = loaded_user_movie_model.signatures["serving_query"]
     INPUT_KEY = list(infer.structured_input_signature[1].keys())[0]
@@ -361,7 +370,7 @@ class RetrieverAndRanker:
     return embeddings_list
   
   def _create_movie_embeddings(inputs: Union[Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]],
-    loaded_user_movie_model) -> tf.Tensor:
+    loaded_user_movie_model, movie_genres_hashtable: tf.lookup.StaticHashTable=None) -> tf.Tensor:
     """
     given inputs, use the serving_candidate model to make embeddings.
     :param inputs: dictionary of inputs where keys must be all columns from the joined ratings file that the models
@@ -372,8 +381,17 @@ class RetrieverAndRanker:
       inputs = [inputs]
     examples_list = []
     for inp_dict in inputs:
-      if not isinstance(inp_dict, dict) or "movie_id" not in inp_dict or "genres" not in inp_dict:
-        raise ValueError("expecting inputs  to be a dictionary that includes movie_id and genres or a list of dictionaries including those")
+      if not isinstance(inp_dict, dict) or "movie_id" not in inp_dict:
+        raise ValueError("expecting inputs  to be a dictionary that includes movie_id "
+          "or a list of dictionaries containing movie_id")
+      movie_id = inp_dict["movie_id"]
+      if movie_genres_hashtable and "genres" not in inp_dict:
+        genres = movie_genres_hashtable.lookup(tf.constant(movie_id, dtype=tf.int64))
+        if genres == b"":
+          raise ValueError(f"movie_id {movie_id} is not registered, and 'genres' is missing from inputs")
+        inp_dict["genres"] = genres.numpy().decode('utf-8')
+      elif "genres" not in inp_dict:
+        raise ValueError(f"'genres' is missing from inputs")
       examples_list.append(RetrieverAndRanker._create_serialized_tfexample(inp_dict))
     infer = loaded_user_movie_model.signatures["serving_candidate"]
     INPUT_KEY = list(infer.structured_input_signature[1].keys())[0]
@@ -418,7 +436,8 @@ class RetrieverAndRanker:
       raise ValueError('top_k must be >= 1')
     if top_k > self.max_k:
       top_k = self.max_k
-    embeddings_tensor = RetrieverAndRanker._create_user_embeddings(user_data_dict, self.loaded_user_movie_model)
+    embeddings_tensor = RetrieverAndRanker._create_user_embeddings(user_data_dict, self.loaded_user_movie_model,
+      self.user_age_ht)
     neighbor_idxs, distances = self.user_indexers.search_batched(embeddings_tensor, top_k)
     nearest_user_ids = [[int(idx) for idx in self.users_ht.lookup(tf.constant(_list, dtype=tf.int64)).numpy()] for _list in neighbor_idxs]
     if not isinstance(user_data_dict, list):
@@ -437,7 +456,8 @@ class RetrieverAndRanker:
       top_k = self.max_k
     #to find similar movies requires all ratings_joined columns, but only the movie_id and genres are used for latest model.
     
-    movie_embeddings = RetrieverAndRanker._create_movie_embeddings(movie_data_dict, self.loaded_user_movie_model)
+    movie_embeddings = RetrieverAndRanker._create_movie_embeddings(movie_data_dict, self.loaded_user_movie_model,
+      self.movie_genres_ht)
     neighbor_idxs, distances = self.movie_indexers.search_batched(movie_embeddings, top_k)
     nearest_movie_ids = [[int(idx) for idx in self.movies_ht.lookup(tf.constant(_list, dtype=tf.int64)).numpy()] for _list in neighbor_idxs]
     if not isinstance(movie_data_dict, list):
@@ -454,7 +474,8 @@ class RetrieverAndRanker:
       raise ValueError('top_k must be >= 1')
     if top_k > self.max_k:
       top_k = self.max_k
-    movie_embeddings = RetrieverAndRanker._create_movie_embeddings(movie_data_dict, self.loaded_user_movie_model)
+    movie_embeddings = RetrieverAndRanker._create_movie_embeddings(movie_data_dict, self.loaded_user_movie_model,
+      self.movie_genres_ht)
     neighbor_idxs, distances = self.user_indexers.search_batched(movie_embeddings, top_k)
     nearest_user_ids = [[int(idx) for idx in self.users_ht.lookup(tf.constant(_list, dtype=tf.int64)).numpy()] for _list in neighbor_idxs]
     return nearest_user_ids
@@ -465,12 +486,13 @@ class RetrieverAndRanker:
       raise ValueError('top_k must be >= 1')
     if top_k > self.max_k:
       top_k = self.max_k
-    user_embeddings = RetrieverAndRanker._create_user_embeddings(user_data_dict, self.loaded_user_movie_model)
+    user_embeddings = RetrieverAndRanker._create_user_embeddings(user_data_dict, self.loaded_user_movie_model,
+      self.user_age_ht)
     neighbor_idxs, distances = self.movie_indexers.search_batched(user_embeddings, top_k)
     nearest_movie_ids = [[int(idx) for idx in self.movies_ht.lookup(tf.constant(_list, dtype=tf.int64)).numpy()] for _list in neighbor_idxs]
     return nearest_movie_ids
   
-  def is_user_known(self, user_id) -> bool:
+  def user_is_known(self, user_id) -> bool:
     id = self.users_ht.lookup(tf.constant(user_id, dtype=tf.int64))
     return False if id == -1 else True
   
@@ -492,9 +514,11 @@ class RetrieverAndRanker:
     """
     if not isinstance(user_data_dict, list):
       user_data_dict = [user_data_dict]
+    
     batch = self._create_dictionary_of_tensors(user_data_dict)
     
     infer_default_for_dict = self.loaded_user_movie_model.signatures["serving_default_dict"]
+    
     predictions = infer_default_for_dict(
       age=batch['age'],
       gender=batch['gender'],
@@ -504,6 +528,7 @@ class RetrieverAndRanker:
       timestamp=batch['timestamp'],
       user_id=batch['user_id'])
     tensor_pred = predictions['outputs']
+    tensor_pred = tf.reshape(tensor_pred, -1)
     
     if as_tensor:
       return tensor_pred

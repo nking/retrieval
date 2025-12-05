@@ -73,20 +73,43 @@ class TestRetrievalAndRanker(unittest.TestCase):
     print(f'sim_movies: {sim_movies}')
     #3089, 1572, 3030, 1068, 2731, 326, 1759, 3134, 2575, 2940
     
+    #test that age is retrieved when missing from inouts
+    user_inp = [{'user_id': 5077}, {'user_id': 1}]
+    sim_users = rr.get_users_given_users(user_inp, top_k=9)
+    print(f'sim_users: {sim_users}')
+    try:
+      user_inp = [{'user_id': 1_000_000}]
+      sim_users = rr.get_users_given_users(user_inp, top_k=9)
+      self.fail("Should have thrown a ValueError")
+    except ValueError:
+      pass
+    
     movie_inp = {'movie_id': 1068, 'genres': 'Crime|Film-Noir'}
     sim_users = rr.get_users_given_movies(movie_inp, top_k=9)
     print(f'sim_users: {sim_users}')
     
+    movie_inp = [{'movie_id': 1068}, {'movie_id': 1}]
+    sim_users = rr.get_users_given_movies(movie_inp, top_k=9)
+    print(f'sim_users: {sim_users}')
+    
+    try:
+      movie_inp = {'movie_id': 1_000_000}
+      sim_users = rr.get_users_given_movies(movie_inp, top_k=9)
+      self.fail("Should have thrown a ValueError")
+    except ValueError:
+      pass
+    
+    movie_inp = [{'movie_id': 1068}, {'movie_id': 1}]
     sim_movies = rr.get_movies_given_movies(movie_inp, top_k=9)
     print(f'sim_movies: {sim_movies}')
     
     cold_starts = rr.get_cold_start_movie_recommendations(10)
     print(f'cold_starts: {cold_starts}')
     
-    print(f'is_user_known(1_000_000)={rr.is_user_known(1_000_000)}')
-    print(f'is_user_known(1)={rr.is_user_known(1)}')
+    print(f'is_user_known(1_000_000)={rr.user_is_known(1_000_000)}')
+    print(f'is_user_known(1)={rr.user_is_known(1)}')
     
-    #use test data to check recommendations.  these are moives the user loved.
+    #use test data to check recommendations.  these are movies the user loved.
     # the returned ratings shuld be high
     user_inp = {'user_id': 635, 'age': 56,
       'movie_id': [1704, 1940], 'genres': ['Drama', 'Drama']}

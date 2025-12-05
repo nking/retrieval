@@ -1,6 +1,6 @@
 from typing import Union, List, Dict, Tuple, Any
 import tensorflow as tf
-from google.protobuf import text_format
+#from google.protobuf import text_format
 import random
 import glob
 
@@ -70,9 +70,9 @@ class RetrieverAndRanker:
       "occupation" : tf.io.FixedLenFeature([], tf.int64),
       "genres" : tf.io.FixedLenFeature([], tf.string)}
     
-    self.user_indexers, self.users_ht = self._create_user_indexer(users_path,
+    self.user_indexers, self.users_ht, self.user_age_ht = self._create_user_indexer(users_path,
       self.loaded_user_movie_model, self.max_k, batch_size=users_batch_size)
-    self.movie_indexers, self.movies_ht = self._create_movie_indexer(movies_path,
+    self.movie_indexers, self.movies_ht, self.movie_genres_ht = self._create_movie_indexer(movies_path,
       self.loaded_user_movie_model, self.max_k, batch_size=movies_batch_size)
     
     pivot_feature_spec = {
@@ -124,32 +124,72 @@ class RetrieverAndRanker:
 
     indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings, top_k=max_k)
 
-    ht = self._create_static_hashtable_for_searcher(ds_ser, "movie_id", batch_size)
+    ht, ht2 = self._create_movie_static_hashtables(ds_ser,  batch_size)
     
-    return indexer, ht
+    return indexer, ht, ht2
   
-  def _create_static_hashtable_for_searcher(self, ds_ser:tf.data.Dataset, key:str, batch_size:int=256) \
-    -> tf.lookup.StaticHashTable:
+  def _create_user_static_hashtables(self, ds_ser:tf.data.Dataset, batch_size:int=256) \
+    -> Tuple[tf.lookup.StaticHashTable, tf.lookup.StaticHashTable]:
     
-    feature_spec = {key: tf.io.FixedLenFeature(shape=[], dtype=tf.int64, default_value=None)}
+    feature_spec = {"user_id": tf.io.FixedLenFeature(shape=[], dtype=tf.int64, default_value=None),
+      "age": tf.io.FixedLenFeature(shape=[], dtype=tf.int64, default_value=None)}
     def parse_tf_example(example_proto, feature_spec):
       return tf.io.parse_single_example(example_proto, feature_spec)
     ds = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
     ids = []
     i = 0
+    ages = []
     for batch in ds.batch(batch_size):
-      ids.append(batch[key])
-      i += len(batch[key])
+      ids.append(batch["user_id"])
+      ages.append(batch["age"])
+      i += len(batch["user_id"])
     ids = tf.concat(ids, 0)
+    ages = tf.concat(ages, 0)
     indexes = tf.constant([idx for idx in range(i)], dtype=tf.int64)
     ht = tf.lookup.StaticHashTable(
       tf.lookup.KeyValueTensorInitializer(indexes, ids),
       default_value=-1
     )
+    ht2 = tf.lookup.StaticHashTable(
+      tf.lookup.KeyValueTensorInitializer(ids, ages),
+      default_value=-1
+    )
+    
     #print(f'[{key}] ht lookup [0,3]={ht.lookup(tf.constant([0,3], dtype=tf.int64))}')
 
-    return ht
- 
+    return ht, ht2
+  
+  def _create_movie_static_hashtables(self, ds_ser:tf.data.Dataset, batch_size:int=256) \
+    -> Tuple[tf.lookup.StaticHashTable, tf.lookup.StaticHashTable]:
+    
+    feature_spec = {"movie_id": tf.io.FixedLenFeature(shape=[], dtype=tf.int64, default_value=None),
+      "genres": tf.io.FixedLenFeature(shape=[], dtype=tf.string, default_value=None)}
+    def parse_tf_example(example_proto, feature_spec):
+      return tf.io.parse_single_example(example_proto, feature_spec)
+    ds = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+    ids = []
+    i = 0
+    genres = []
+    for batch in ds.batch(batch_size):
+      ids.append(batch["movie_id"])
+      genres.append(batch["genres"])
+      i += len(batch["movie_id"])
+    ids = tf.concat(ids, 0)
+    genres = tf.concat(genres, 0)
+    indexes = tf.constant([idx for idx in range(i)], dtype=tf.int64)
+    ht = tf.lookup.StaticHashTable(
+      tf.lookup.KeyValueTensorInitializer(indexes, ids),
+      default_value=-1
+    )
+    ht2 = tf.lookup.StaticHashTable(
+      tf.lookup.KeyValueTensorInitializer(ids, genres),
+      default_value=""
+    )
+    
+    #print(f'[{key}] ht lookup [0,3]={ht.lookup(tf.constant([0,3], dtype=tf.int64))}')
+
+    return ht, ht2
+  
   def _prep_cold_start_rankings(movies_pivot_path:str, feature_spec:Dict[str, Any], max_k:int=1000,
     batch_size:int=256):
     
@@ -368,9 +408,9 @@ class RetrieverAndRanker:
 
     indexer = RetrieverAndRanker.build_scann_searcher(embeddings=embeddings, top_k=max_k)
     
-    ht = self._create_static_hashtable_for_searcher(ds_ser, "user_id", batch_size)
+    id_ht, age_ht = self._create_user_static_hashtables(ds_ser, batch_size)
     
-    return indexer, ht
+    return indexer, id_ht, age_ht
 
   def get_users_given_users(self, user_data_dict:Union[
     Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]], top_k:int):

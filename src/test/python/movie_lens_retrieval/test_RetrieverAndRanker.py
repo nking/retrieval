@@ -4,7 +4,7 @@ import unittest
 from helper import *
 from movie_lens_retrieval.RetrieverAndRanker import RetrieverAndRanker
 
-class TestRetrievalAndRanker(unittest.TestCase):
+class TestRetrieverAndRanker(unittest.TestCase):
   def setUp(self):
     
     saved_models_dir = os.path.join(get_project_dir(), "src/main/resources/serving_models")

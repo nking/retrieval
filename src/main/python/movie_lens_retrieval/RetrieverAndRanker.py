@@ -5,6 +5,8 @@ import random
 import glob
 
 from absl import logging
+from tensorflow.python.ops.variables import moving_average_variables
+
 logging.set_verbosity(logging.WARNING)
 logging.set_stderrthreshold(logging.WARNING)
 
@@ -481,7 +483,7 @@ class RetrieverAndRanker:
     return nearest_user_ids
 
   def get_movies_given_users(self, user_data_dict:Union[Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]],
-    top_k:int):
+    top_k:int, use_ranker:bool=True):
     if top_k < 1:
       raise ValueError('top_k must be >= 1')
     if top_k > self.max_k:
@@ -490,6 +492,28 @@ class RetrieverAndRanker:
       self.user_age_ht)
     neighbor_idxs, distances = self.movie_indexers.search_batched(user_embeddings, top_k)
     nearest_movie_ids = [[int(idx) for idx in self.movies_ht.lookup(tf.constant(_list, dtype=tf.int64)).numpy()] for _list in neighbor_idxs]
+    
+    if use_ranker:
+      #rank results by the predicted ratings for the user and movie combination
+      if not isinstance(user_data_dict, list):
+        user_data_dict = [user_data_dict]
+      outputs = []
+      for inp_dict, movie_ids in zip(user_data_dict, nearest_movie_ids):
+        #reformat into:
+        #user_inp = {'user_id': 635, 'age': 56,
+        #         'movie_id': [1704, 1940],
+        #         'genres': ['Drama', 'Drama']}
+        #reformat into
+        user_inp = {**inp_dict}
+        user_inp['movie_id'] = movie_ids
+        genres = self.movie_genres_ht.lookup(tf.constant(movie_ids, dtype=tf.int64))
+        user_inp['genres'] = genres.numpy().tolist()
+        ratings = self.get_ratings(user_inp)
+        sorted_comb = sorted(zip(ratings, movie_ids))
+        sorted_ratings, sorted_movies = zip(*sorted_comb)
+        outputs.append(sorted_movies)
+      return outputs
+    
     return nearest_movie_ids
   
   def user_is_known(self, user_id) -> bool:

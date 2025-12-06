@@ -1,0 +1,7 @@
+- add retrieval metrics and testing with the 2nd 
+  time partitioned dataset
+
+  - the @K's for precision, recall, map, mrr, ndcg
+  - weighted averaged precision for performance metrics
+    and maximization of precision
+  - survival functions of hyper-geometric distr

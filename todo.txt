@@ -3,11 +3,12 @@
     sort recommendations
   - could instead build a ranker:
     - use tf_keras.layers.HardNEgativeMining
-    and 2 encoding layers followed by a DNN
-    of dense layers decreasing to size of 1.
+      and 2 encoding layers followed by a DNN
+      of dense layers decreasing to size of 1.
+    - create a TFX pipeline to train the model
     - the usage would be, given inputs of 
-    user_id and n movi_ids, it would rank and
-    return results.
+      user_id and n movi_ids, it would rank and
+      return results.
 
 - add retrieval metrics and testing with the 2nd 
   time partitioned dataset

@@ -1,3 +1,14 @@
+- consider a separate model for the ranking:
+  - currently, using the bi-encoder ratings to
+    sort recommendations
+  - could instead build a ranker:
+    - use tf_keras.layers.HardNEgativeMining
+    and 2 encoding layers followed by a DNN
+    of dense layers decreasing to size of 1.
+    - the usage would be, given inputs of 
+    user_id and n movi_ids, it would rank and
+    return results.
+
 - add retrieval metrics and testing with the 2nd 
   time partitioned dataset
 

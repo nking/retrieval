@@ -1,3 +1,9 @@
+- change current hard-negative mining script name
+  to soft negative mining.
+  - copy it and modify to add to it hard negatives
+    derived from using retrieval of movies for a user
+    and from the list ordered by closest to user vec
+    choose first 3 that the user rated 1 or 2.
 - consider a separate model for the ranking:
   - currently, using the bi-encoder ratings to
     sort recommendations

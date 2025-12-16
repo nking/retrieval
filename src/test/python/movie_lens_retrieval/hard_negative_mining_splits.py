@@ -238,6 +238,48 @@ val_samples = make_samples(val_df2)
 train_samples.write_parquet(file=os.path.join(get_bin_dir(), "train-00000-of-00001.parquet"), use_pyarrow=True)
 val_samples.write_parquet(file=os.path.join(get_bin_dir(),"validation-00000-of-00001.parquet"), use_pyarrow=True)
 
+#write train and val having same ids in both:
+set_tr = set(train_samples["user_id"])
+set_val = set(val_samples["user_id"])
+symm_diff = set_tr ^ set_val
+train_samples_2 = train_samples.filter(~pl.col("user_id").is_in(symm_diff))
+val_samples_2 = val_samples.filter(~pl.col("user_id").is_in(symm_diff))
+train_samples_2.write_parquet(file=os.path.join(get_bin_dir(), "train2-00000-of-00001.parquet"), use_pyarrow=True)
+val_samples_2.write_parquet(file=os.path.join(get_bin_dir(),"validation2-00000-of-00001.parquet"), use_pyarrow=True)
+
+#making a small sample for tests
+n = 100
+user_ids = train_samples_2["user_id"].unique().sample(n=n, seed=0)
+train_samples_2 = train_samples_2.filter(pl.col("user_id").is_in(user_ids))
+train_samples_2 = train_samples_2.sample(n=n, seed=0)
+val_samples_2 = val_samples_2.filter(pl.col("user_id").is_in(user_ids))
+val_samples_2 = val_samples_2.sample(n=n, seed=0)
+train_samples_2.write_parquet(file=os.path.join(get_bin_dir(), "trainsmall-00000-of-00001.parquet"), use_pyarrow=True)
+val_samples_2.write_parquet(file=os.path.join(get_bin_dir(),"validationsmall-00000-of-00001.parquet"), use_pyarrow=True)
+
+## ================ do same except no splits for the test data in sorted_2 ======
+in_file_pattern = os.path.join(get_project_dir(),
+  "src/test/resources/data/sorted_2/ratings_sorted_2_joined*parquet")
+df = pl.read_parquet(in_file_pattern)
+filtered = (df.group_by("user_id").agg(pl.len().alias("rating_count"))
+  .filter(pl.col("rating_count") >= 2*NUM_CANDIDATES_PER_LIST).select("user_id")
+  .join(df, on="user_id", how="inner"))
+pos_user_df = agg_columns(filtered, [4,5])
+neg_user_df = agg_columns(filtered, [1,2])
+set_pos = set(pos_user_df["user_id"])
+set_neg = set(neg_user_df["user_id"])
+symm_diff = set_pos ^ set_neg
+pos_user_df = pos_user_df.filter(~pl.col("user_id").is_in(symm_diff))
+neg_user_df = neg_user_df.filter(~pl.col("user_id").is_in(symm_diff))
+test_df = join_pos_neg(pos_train_df, neg_train_df)
+test_df2 = test_df.explode(['movie_id_pos', 'genres_pos', 'rating_pos'])
+test_samples = make_samples(test_df2)
+print(f'writing test samples')
+test_samples.write_parquet(file=os.path.join(get_bin_dir(), "test-00000-of-00001.parquet"), use_pyarrow=True)
+test_samples_2 = test_samples.filter(pl.col("user_id").is_in(user_ids))
+test_samples_2 = test_samples_2.sample(n=n, seed=0)
+test_samples_2.write_parquet(file=os.path.join(get_bin_dir(), "testsmall-00000-of-00001.parquet"), use_pyarrow=True)
+
 #['user_id', 'age', 'movies', 'ratings', 'genres']
-print(f'wrote parquet files to {get_bin_dir()}')
+print(f'wrote train and validatin parquet files to {get_bin_dir()}')
 print(f'columns are {train_samples.columns}')

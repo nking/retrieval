@@ -1,6 +1,7 @@
+from typing import Tuple, Dict
+
 import polars as pl
 import random
-import numpy as np
 from helper import *
 from movie_lens_retrieval.RetrieverAndRanker import RetrieverAndRanker
 import os
@@ -39,10 +40,11 @@ below, can set NUM_CANDIDATES_PER_LIST and NUM_SAMPLES_PER_POS
 
 NUM_CANDIDATES_PER_LIST = 5
 NUM_SAMPLES_PER_POS = 2 #for each positive movie rating for a user, make this many lists of length NUM_CANDIDATES_PER_LIST
-max_top_k = 1000
-#there are only pos, neg counts=(1548, 1548) when max_top_k=1000,
+max_top_k = 500
+#there are pos, neg counts=(1548, 1548) when max_top_k=1000,
 # that is, 25% of users could use re-ranked recommendations
 #the pos, neg counts=(4041, 4041) when max_top_k=10000, which is 67% of users
+#when max_top_k=100, 32/800187 is negligible % of users needing re-ranker
 
 in_file_pattern = os.path.join(get_project_dir(),
   "src/test/resources/data/sorted_1/ratings_sorted_1_joined*parquet")
@@ -53,16 +55,13 @@ print(f'count={df["user_id"].count()}')
 
 filtered = df.group_by("user_id").agg(pl.len().alias("rating_count")).filter(pl.col("rating_count") >= 2*NUM_CANDIDATES_PER_LIST).select("user_id").join(df, on="user_id", how="inner")
 
+print(f'count after filter for too few ratings ={filtered["user_id"].count()}')
+
 def agg_columns(filtered0, ratings:List[int]=[4,5]):
   _df = filtered0.filter(pl.col("rating").is_in(ratings))
-  df0 = _df.group_by("user_id").agg(pl.col("movie_id"))
-  df1 = _df.group_by("user_id").agg(pl.col("genres"))
-  df2 = _df.group_by("user_id").agg(pl.col("rating"))
-  df3 = _df.select(["user_id", "age"]).unique()
+  df0 = _df.group_by("user_id").agg([pl.col("movie_id"), pl.col("genres"), pl.col("rating")])
+  df1 = _df.select(["user_id", "age"]).unique()
   _user_df = df0.join(df1, on="user_id", how="inner")
-  _user_df = _user_df.join(df2, on="user_id", how="inner")
-  _user_df = _user_df.join(df3, on="user_id", how="inner")
-  #remove any with only 1 movie. later need to split between train, val
   _user_df = _user_df.with_columns([
     pl.col("movie_id").list.len().alias("n_r"),
   ])
@@ -91,60 +90,39 @@ def create_retrievalreranker():
   
 rr = create_retrievalreranker()
 
-def calculate_hard_negative_movies(row) -> list:
+def calculate_hard_negative_movies(row) -> Dict[str, List[int] | List[str]]:
   top_k = max_top_k #3 * row['n_r']
   sim_movies = rr.get_movies_given_users(
-    {'user_id': row['user_id'], 'age': row['age'] }, top_k = top_k, use_ranker=False)[0]
-  inter = list(set(sim_movies) & set(row['movie_id']))
-  return inter
+    {'user_id': row['user_id'], 'age': row['age'] },
+    top_k = top_k, use_ranker=True)[0]
+  m_dict = {m_id: idx for idx, m_id in enumerate(row['movie_id'])}
+  movies = []
+  ratings = []
+  genres = []
+  for m_id in sim_movies:
+    if len(movies) == top_k:
+      break
+    if m_id in m_dict:
+      idx = m_dict[m_id]
+      movies.append(row['movie_id'][idx])
+      ratings.append(row['rating'][idx])
+      genres.append(row['genres'][idx])
+  return {'m_list': movies, 'r_list': ratings, 'g_list': genres}
 
 #columns: ['user_id', 'movie_id', 'genres', 'rating', 'age', 'n_r', 'movie_id_hard']
 neg_user_df = neg_user_df.with_columns(
-  pl.struct(['user_id', 'age', 'n_r', 'movie_id'])
-  #pl.struct([pl.col("user_id"), pl.col('age'), pl.col('n_r'),pl.col("movie_id")])
-  .map_elements(calculate_hard_negative_movies,return_dtype=pl.List(pl.Int64)
-  ).alias('movie_id')
+  pl.struct(['user_id', 'age', 'movie_id', 'rating', 'genres'])
+  .map_elements(calculate_hard_negative_movies,
+    return_dtype=pl.Struct({
+        "m_list": pl.List(pl.Int64),
+        "r_list": pl.List(pl.Int64),
+        "g_list": pl.List(pl.String)
+    })
+  ).alias('negatives')
 )
-
-"""
-def calculate_hard_movies_batch(columns: list[pl.Series],
-  rr_instance) -> pl.Series:
-  
-  user_id_series, age_series, n_r_series, movie_id_list_series = columns
-  
-  input_list = [{'user_id': uid, 'age': age}
-    for uid, age in zip(user_id_series, age_series)
-  ]
-  
-  top_k = 5 * int(n_r_series.max())
-  
-  sim_movies_batch = rr_instance.get_movies_given_users(input_list, top_k=top_k)
-  
-  user_movies_batch = movie_id_list_series.to_list()
-  
-  intersection_results = [list(set(user_movies) & set(sim_movies))
-    for sim_movies, user_movies in zip(sim_movies_batch, user_movies_batch)]
-  
-  return pl.Series(values=intersection_results, dtype=pl.List(pl.Int64))
-
-COLUMNS_TO_MAP = ['user_id', 'age', 'n_r', 'movie_id']
-neg_user_df.drop("hard")
-neg_user_df_2 = (
-  neg_user_df
-    #.lazy()
-    .with_columns(
-      pl.col(COLUMNS_TO_MAP)
-      .map_batches(
-        function=lambda cols: calculate_hard_movies_batch(cols, rr),
-        return_dtype=pl.List(pl.Int64)
-      ).alias('hard')
-  )#.collect()
-)
-print(f'COLUMNS={neg_user_df.columns}')
-neg_user_df = neg_user_df_2.with_columns([
-  pl.col("hard").alias("movie_id"),
-])
-"""
+neg_user_df = neg_user_df.unnest("negatives")
+neg_user_df = neg_user_df.drop(['movie_id', 'rating', 'genres'])
+neg_user_df = neg_user_df.rename({'m_list': 'movie_id', 'r_list': 'rating', 'g_list': 'genres'})
 neg_user_df = neg_user_df.with_columns([
   pl.col("movie_id").list.len().alias("n_r"),
 ])
@@ -216,6 +194,9 @@ def rename_cols(df2, prefix:str="pos"):
 pos_train_df, pos_val_df = split(pos_user_df)
 neg_train_df, neg_val_df = split(neg_user_df)
 
+print(f'train: pos, neg counts={pos_train_df["user_id"].count(), neg_train_df["user_id"].count()}')
+print(f'validation: pos, neg counts={pos_val_df["user_id"].count(), neg_val_df["user_id"].count()}')
+
 def join_pos_neg(pos_df2, neg_df2):
   pos_df2 = rename_cols(pos_df2, "pos")
   neg_df2 = rename_cols(neg_df2, "neg")
@@ -230,6 +211,9 @@ def join_pos_neg(pos_df2, neg_df2):
 train_df = join_pos_neg(pos_train_df, neg_train_df)
 val_df = join_pos_neg(pos_val_df, neg_val_df)
 
+print(f'train: counts={train_df["user_id"].count()}')
+print(f'validation: counts={val_df["user_id"].count()}')
+
 train_df2 = train_df.explode(['movie_id_pos', 'genres_pos', 'rating_pos'])
 val_df2 = val_df.explode(['movie_id_pos', 'genres_pos', 'rating_pos'])
 # for each pos_[train or val]_df, 
@@ -243,83 +227,52 @@ struct_dtype = pl.Struct([
   pl.Field("genres", pl.List(pl.List(pl.String)))
 ])
 
-def create_samples(s: pl.Series) -> pl.Series:
-  #the pos are scalars, the neg are arrays
-  pos_id_series = s.struct.field("movie_id_pos")
-  pos_rating_series = s.struct.field("rating_pos")
-  pos_genres_series = s.struct.field("genres_pos")
-  neg_ids_series = s.struct.field("movie_id_neg")
-  neg_ratings_series = s.struct.field("rating_neg")
-  neg_genres_series = s.struct.field("genres_neg")
-  #output number of rows needs to match input, so we
-  #expand on inner dimension.  in other words if we have 10 rows, and K=3, and N=2, the output shape is [10, 3, 2]
-  output_movies_list = None
-  output_ratings_list = None
-  output_genres_list = None
+def create_samples(row) -> Dict[str, List[int] | List[str]]:
+  output_movies_list = []
+  output_ratings_list = []
+  output_genres_list = []
   for i_sample in range(NUM_SAMPLES_PER_POS):
-    output_movies = []
-    output_ratings = []
-    output_genres = []
-    for pos_id, pos_rating, pos_genres, neg_ids, neg_ratings,\
-      neg_genres in zip(pos_id_series, pos_rating_series,\
-      pos_genres_series,  neg_ids_series, neg_ratings_series,\
-      neg_genres_series):
-      if len(neg_ids) < K:
-        output_movies.append((K+1)*[-1])
-        output_ratings.append((K+1)*[-1])
-        output_genres.append((K+1)*[-1])
-        continue
-      else:
-        chosen_indices = random.sample(range(len(neg_ids)), K)
-      movie_ids = [pos_id] + [neg_ids[i] for i in chosen_indices]
-      ratings = [pos_rating] + [neg_ratings[i] for i in chosen_indices]
-      genres = [pos_genres] + [neg_genres[i] for i in chosen_indices]
-      output_movies.append(movie_ids)
-      output_ratings.append(ratings)
-      output_genres.append(genres)
-    output_movies = np.expand_dims(output_movies, axis=1)
-    output_ratings = np.expand_dims(output_ratings, axis=1)
-    output_genres = np.expand_dims(output_genres, axis=1)
-    #print(f'i={i_sample}: shape={np.shape(output_movies)}')
-    if output_movies_list is None:
-      output_movies_list = output_movies.copy()
-      output_ratings_list = output_ratings.copy()
-      output_genres_list = output_genres.copy()
+    if len(row['movie_id_neg']) < K:
+      output_movies = (K + 1) * [-1]
+      output_ratings = (K + 1) * [-1]
+      output_genres = (K + 1) * [""]
     else:
-      output_movies_list = np.concatenate([output_movies_list, output_movies], axis=1)
-      output_ratings_list = np.concatenate([output_ratings_list, output_ratings], axis=1)
-      output_genres_list = np.concatenate([output_genres_list, output_genres], axis=1)
-  #print(f'shapes={np.shape(output_movies_list)}, {np.shape(output_ratings_list)}, {np.shape(output_genres_list)}')
-  return pl.Series(
-    values=[
-      {'movies': m, 'ratings': r, 'genres':g}
-        for m, r, g in zip(output_movies_list.tolist(), output_ratings_list.tolist(), output_genres_list.tolist())
-     ])
+      chosen_indices = random.sample(range(len(row['movie_id_neg'])), K)
+      output_movies = [row['movie_id_pos']] + [row['movie_id_neg'][i] for i in chosen_indices]
+      output_ratings = [row['rating_pos']] + [row['rating_neg'][i] for i in chosen_indices]
+      output_genres = [row['genres_pos']] + [row['genres_neg'][i] for i in chosen_indices]
+    output_movies_list.append(output_movies)
+    output_ratings_list.append(output_ratings)
+    output_genres_list.append(output_genres)
+  return {'movies': output_movies_list, 'ratings': output_ratings_list,
+        'genres': output_genres_list}
 
 def make_samples(df2):
   samples = df2.with_columns(
-    pl.struct([
-      pl.col("movie_id_pos"), pl.col('rating_pos'),
-      pl.col('genres_pos'),
-      pl.col("movie_id_neg"), pl.col('rating_neg'),
-      pl.col("genres_neg") 
+    pl.struct(["movie_id_pos", 'rating_pos', 'genres_pos',
+      "movie_id_neg", 'rating_neg', "genres_neg"
     ])
-    .map_batches(create_samples, return_dtype=struct_dtype)
+    .map_elements(create_samples, return_dtype=struct_dtype)
     .alias("sample_struct")
-  ).unnest("sample_struct")
+  ).unnest("sample_struct") #unnest makes the struct into new columns
+  #print(f'SHAPE of unested: {np.shape(samples["movies"][0])}')
   samples = (
-    samples.explode(['movies', 'ratings', 'genres'])
+    samples.explode(['movies', 'ratings', 'genres']) #explode expands the columns into new rows
   )
+  #print(f'SHAPE of unested: {np.shape(samples["movies"][0])}')
   samples = samples.select(['user_id', 'age', 'movies', 'ratings', 'genres'])
   samples = samples.filter(
     pl.col("movies").list.eval(pl.element() != -1).list.any()
   )
   return samples
 
-print(f'writing train samples')
+print(f'sampling train n_rows={train_df2["user_id"].count()}')
 train_samples = make_samples(train_df2)
-print(f'writing validation samples')
+print(f'=> train_samples n_rows={train_samples["movies"].count()}')
+
+print(f'sampling validation n_rows={val_df2["user_id"].count()}')
 val_samples = make_samples(val_df2)
+print(f'=> val_samples n_rows={val_samples["movies"].count()}')
 
 #use py_arrow=True for huggingface datasets
 train_samples.write_parquet(file=os.path.join(get_bin_dir(), "train-00000-of-00001.parquet"), use_pyarrow=True)
@@ -328,6 +281,8 @@ val_samples.write_parquet(file=os.path.join(get_bin_dir(),"validation-00000-of-0
 #write train and val having same ids in both:
 set_tr = set(train_samples["user_id"])
 set_val = set(val_samples["user_id"])
+print(f'n_rows w/ same users in both train and val ={len(set_tr & set_val)}')
+
 symm_diff = set_tr ^ set_val
 train_samples_2 = train_samples.filter(~pl.col("user_id").is_in(symm_diff))
 val_samples_2 = val_samples.filter(~pl.col("user_id").is_in(symm_diff))
@@ -339,7 +294,7 @@ print(f'train_samples_2, val_samples_2 counts={train_samples_2["user_id"].count(
 #making a small sample for tests
 user_ids = train_samples_2["user_id"].unique()
 n = min(100, user_ids.count())
-print(f'n={n} for testsmall')
+print(f'=> n={n} for testsmall')
 
 user_ids = user_ids.sample(n=n, seed=0)
 user_ids = user_ids.implode()

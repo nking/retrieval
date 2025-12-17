@@ -2,7 +2,6 @@ import polars as pl
 import random
 import numpy as np
 from helper import *
-from movie_lens_retrieval.RetrieverAndRanker import RetrieverAndRanker
 import os
 
 """
@@ -39,17 +38,11 @@ below, can set NUM_CANDIDATES_PER_LIST and NUM_SAMPLES_PER_POS
 
 NUM_CANDIDATES_PER_LIST = 5
 NUM_SAMPLES_PER_POS = 2 #for each positive movie rating for a user, make this many lists of length NUM_CANDIDATES_PER_LIST
-max_top_k = 1000
-#there are only pos, neg counts=(1548, 1548) when max_top_k=1000,
-# that is, 25% of users could use re-ranked recommendations
-#the pos, neg counts=(4041, 4041) when max_top_k=10000, which is 67% of users
 
 in_file_pattern = os.path.join(get_project_dir(),
   "src/test/resources/data/sorted_1/ratings_sorted_1_joined*parquet")
-  #"src/test/resources/data/sorted_2/ratings_sorted_2_joined*parquet")
 
 df = pl.read_parquet(in_file_pattern)
-print(f'count={df["user_id"].count()}')
 
 filtered = df.group_by("user_id").agg(pl.len().alias("rating_count")).filter(pl.col("rating_count") >= 2*NUM_CANDIDATES_PER_LIST).select("user_id").join(df, on="user_id", how="inner")
 
@@ -72,93 +65,13 @@ def agg_columns(filtered0, ratings:List[int]=[4,5]):
 pos_user_df = agg_columns(filtered, [4,5])
 neg_user_df = agg_columns(filtered, [1,2])
 
-def create_retrievalreranker():
-  user_movie_models_dir = os.path.join(os.path.join(get_project_dir(),
-    "src/main/resources/serving_models/user_movie_model"))
-  movie_inputs = os.path.join(get_project_dir(),
-    "src/test/resources/data/movie_emb_inp/tfrecord*.gz")
-  user_inputs = os.path.join(get_project_dir(),
-    "src/test/resources/data/user_emb_inp/tfrecord*.gz")
-  movies_mean_ratings_pivot = os.path.join(get_project_dir(),
-    "src/test/resources/data/ratings_and_predictions_pivot/mean_ratings_tfrecord*.gz")
-  movies_predictions_pivot = os.path.join(get_project_dir(),
-    "src/test/resources/data/ratings_and_predictions_pivot/mm_predictions_tfrecord*.gz")
-  rr = RetrieverAndRanker(user_movie_saved_model_dir = user_movie_models_dir,
-    movies_path = movie_inputs, users_path=user_inputs,
-    movies_pivot_path=movies_mean_ratings_pivot,
-    max_k= max_top_k, movies_batch_size=256)
-  return rr
-  
-rr = create_retrievalreranker()
-
-def calculate_hard_negative_movies(row) -> list:
-  top_k = max_top_k #3 * row['n_r']
-  sim_movies = rr.get_movies_given_users(
-    {'user_id': row['user_id'], 'age': row['age'] }, top_k = top_k, use_ranker=False)[0]
-  inter = list(set(sim_movies) & set(row['movie_id']))
-  return inter
-
-#columns: ['user_id', 'movie_id', 'genres', 'rating', 'age', 'n_r', 'movie_id_hard']
-neg_user_df = neg_user_df.with_columns(
-  pl.struct(['user_id', 'age', 'n_r', 'movie_id'])
-  #pl.struct([pl.col("user_id"), pl.col('age'), pl.col('n_r'),pl.col("movie_id")])
-  .map_elements(calculate_hard_negative_movies,return_dtype=pl.List(pl.Int64)
-  ).alias('movie_id')
-)
-
-"""
-def calculate_hard_movies_batch(columns: list[pl.Series],
-  rr_instance) -> pl.Series:
-  
-  user_id_series, age_series, n_r_series, movie_id_list_series = columns
-  
-  input_list = [{'user_id': uid, 'age': age}
-    for uid, age in zip(user_id_series, age_series)
-  ]
-  
-  top_k = 5 * int(n_r_series.max())
-  
-  sim_movies_batch = rr_instance.get_movies_given_users(input_list, top_k=top_k)
-  
-  user_movies_batch = movie_id_list_series.to_list()
-  
-  intersection_results = [list(set(user_movies) & set(sim_movies))
-    for sim_movies, user_movies in zip(sim_movies_batch, user_movies_batch)]
-  
-  return pl.Series(values=intersection_results, dtype=pl.List(pl.Int64))
-
-COLUMNS_TO_MAP = ['user_id', 'age', 'n_r', 'movie_id']
-neg_user_df.drop("hard")
-neg_user_df_2 = (
-  neg_user_df
-    #.lazy()
-    .with_columns(
-      pl.col(COLUMNS_TO_MAP)
-      .map_batches(
-        function=lambda cols: calculate_hard_movies_batch(cols, rr),
-        return_dtype=pl.List(pl.Int64)
-      ).alias('hard')
-  )#.collect()
-)
-print(f'COLUMNS={neg_user_df.columns}')
-neg_user_df = neg_user_df_2.with_columns([
-  pl.col("hard").alias("movie_id"),
-])
-"""
-neg_user_df = neg_user_df.with_columns([
-  pl.col("movie_id").list.len().alias("n_r"),
-])
-neg_user_df = neg_user_df.filter(pl.col("n_r") >= (NUM_CANDIDATES_PER_LIST-1))
-
-#remove users not in both pos and neg.
+#remove users not in both pos and neg. 
 # A Left Anti Join (often just "Anti Join")
-set_pos = set(pos_user_df["user_id"])
+set_pos = set(pos_user_df["user_id"]) 
 set_neg = set(neg_user_df["user_id"])
 symm_diff = set_pos ^ set_neg
 pos_user_df = pos_user_df.filter(~pl.col("user_id").is_in(symm_diff))
 neg_user_df = neg_user_df.filter(~pl.col("user_id").is_in(symm_diff))
-#columns: ['user_id', 'movie_id', 'genres', 'rating', 'age', 'n_r']
-print(f'pos, neg counts={pos_user_df["user_id"].count(), neg_user_df["user_id"].count()}')
 
 def split(df2):
   """
@@ -334,15 +247,9 @@ val_samples_2 = val_samples.filter(~pl.col("user_id").is_in(symm_diff))
 train_samples_2.write_parquet(file=os.path.join(get_bin_dir(), "train2-00000-of-00001.parquet"), use_pyarrow=True)
 val_samples_2.write_parquet(file=os.path.join(get_bin_dir(),"validation2-00000-of-00001.parquet"), use_pyarrow=True)
 
-print(f'train_samples_2, val_samples_2 counts={train_samples_2["user_id"].count(), val_samples_2["user_id"].count()}')
-
 #making a small sample for tests
-user_ids = train_samples_2["user_id"].unique()
-n = min(100, user_ids.count())
-print(f'n={n} for testsmall')
-
-user_ids = user_ids.sample(n=n, seed=0)
-user_ids = user_ids.implode()
+n = 100
+user_ids = train_samples_2["user_id"].unique().sample(n=n, seed=0)
 train_samples_2 = train_samples_2.filter(pl.col("user_id").is_in(user_ids))
 train_samples_2 = train_samples_2.sample(n=n, seed=0)
 val_samples_2 = val_samples_2.filter(pl.col("user_id").is_in(user_ids))

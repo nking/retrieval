@@ -63,7 +63,7 @@ class TestRetrieverAndRanker(unittest.TestCase):
                             movies_pivot_path=self.movies_mean_ratings_pivot,
                             max_k= 1000, movies_batch_size=256)
     
-    #who are the users similar to user_id=1
+    #who are the users similar to user_id=
     user_inp = {'user_id': 5077, 'age':25}
     sim_users = rr.get_users_given_users(user_inp, top_k=9)
     print(f'sim_users: {sim_users}')
@@ -113,8 +113,69 @@ class TestRetrieverAndRanker(unittest.TestCase):
     # the returned ratings shuld be high
     user_inp = {'user_id': 635, 'age': 56,
       'movie_id': [1704, 1940], 'genres': ['Drama', 'Drama']}
-    ratings = rr.get_ratings(user_inp)
-    print(f'ratings: {ratings}')
+    preds = rr.get_predictions(user_inp)
+    print(f'predictions: {preds}')
     
+  def test_eval_single_genre(self):
+    '''
+    evaluate the test users who have only rated movies that have a single genre and that those movies they've rated
+    all have the same single genre.
+    '''
+    import polars as pl
+    
+    rr = RetrieverAndRanker(
+      user_movie_saved_model_dir=self.user_movie_models_dir,
+      movies_path=self.movie_inputs, users_path=self.user_inputs,
+      movies_pivot_path=self.movies_mean_ratings_pivot,
+      max_k=1000, movies_batch_size=256)
+    
+    test_users_df = pl.read_parquet(os.path.join(get_project_dir(),
+      "src/test/resources/data/single_genre/users_single_genre.parquet"))
+    test_users_df = test_users_df.drop('zipcode')
+    # columns=['user_id', 'gender', 'age', 'occupation', 'zipcode']
+    
+    ratings_seen_df = pl.read_parquet(os.path.join(get_project_dir(),
+      "src/test/resources/data/sorted_1/ratings_sorted_1_joined-*.parquet"))
+    ratings_seen_df = ratings_seen_df.filter(pl.col('user_id').is_in(test_users_df['user_id'].implode()))
+    print(f'ratings seen {ratings_seen_df.count()}')
+    
+    ratings_unseen_df = pl.read_parquet(os.path.join(get_project_dir(),
+      "src/test/resources/data/sorted_2/ratings_sorted_2_joined-*.parquet"))
+    ratings_unseen_df = ratings_unseen_df.filter(
+      pl.col('user_id').is_in(test_users_df['user_id'].implode()))
+    print(f'ratings unseen {ratings_unseen_df.count()}')
+    
+    res_hg  = {}
+    res_ndcg = {}
+    res_mrr = {}
+    res_recall = {}
+    users_inp  = test_users_df.to_dicts()
+    for k in [20, 50, 100, 200]:
+      sim_movies = rr.get_movies_given_users(users_inp, top_k=k)
+      for i in range(len(sim_movies)):
+        recommended = set(sim_movies[i])
+        user_inp = users_inp[i]
+        seen = (
+          ratings_seen_df.filter(pl.col('user_id') == user_inp['user_id'])
+          .select('movie_id').to_series().to_list()
+        )
+        unseen = (
+          ratings_unseen_df.filter(
+            pl.col('user_id') == user_inp['user_id'])
+            .select(['movie_id', 'rating'])
+        )
+        n_seen = len(seen)
+        n_unseen = unseen['movie_id'].count()
+        #predict the scores.  this can be done better in the re-ranker
+        recommended = list(recommended - set(seen))
+        inp = {**user_inp}
+        inp['movie_id'] = recommended
+        inp['genres'] = rr.movie_genres_ht.lookup(tf.constant(recommended, dtype=tf.int64)).numpy().tolist()
+        preds = rr.get_predictions(inp)
+        sorted_comb = sorted(zip(preds, recommended))
+        sorted_ratings, sorted_movies = zip(*sorted_comb)
+        
+        #TODO: finish eval stats
+        
   if __name__ == '__main__':
     unittest.main()

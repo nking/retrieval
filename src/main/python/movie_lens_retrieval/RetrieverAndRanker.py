@@ -345,7 +345,7 @@ class RetrieverAndRanker:
     """
     given inputs, use the query_candidate model to make embeddings.
     :param inputs: dictionary of inputs where keys must be all columns from the joined ratings file that the models
-    were trained upon.  Note that for the user model, only usr_id and age are used, so the other items can be fake.
+    were trained upon.  Note that for the user model, only user_id and age are used, so the other items can be fake.
     :return: embeddings usable for the vector approx nearest neighbor searches.
     output format is tensor of shape (len(inputs as a list),)
     """
@@ -509,8 +509,8 @@ class RetrieverAndRanker:
         user_inp['movie_id'] = movie_ids
         genres = self.movie_genres_ht.lookup(tf.constant(movie_ids, dtype=tf.int64))
         user_inp['genres'] = genres.numpy().tolist()
-        ratings = self.get_ratings(user_inp)
-        sorted_comb = sorted(zip(ratings, movie_ids))
+        preds = self.get_predictions(user_inp)
+        sorted_comb = sorted(zip(preds, movie_ids))
         sorted_ratings, sorted_movies = zip(*sorted_comb)
         outputs.append(sorted_movies)
       return outputs
@@ -521,7 +521,7 @@ class RetrieverAndRanker:
     id = self.users_ht.lookup(tf.constant(user_id, dtype=tf.int64))
     return False if id == -1 else True
   
-  def get_ratings(self, user_data_dict: Union[
+  def get_predictions(self, user_data_dict: Union[
     Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]], as_tensor:bool=False):
     """
     given users and movies, return predictions.

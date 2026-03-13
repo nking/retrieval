@@ -56,8 +56,8 @@ class TestRetrieverAndRanker(unittest.TestCase):
       indexer = RetrieverAndRanker.build_scann_searcher(embeddings_tensor, top_k=2)
       neighbor_idxs, distances = indexer.search_batched(embeddings_tensor, 2)
       #results are both np.ndarrays
-      self.assertEquals([0,1], neighbor_idxs[0].tolist())
-      self.assertEquals([1,0], neighbor_idxs[1].tolist())
+      self.assertEqual([0,1], neighbor_idxs[0].tolist())
+      self.assertEqual([1,0], neighbor_idxs[1].tolist())
       a = set([i  for _list in neighbor_idxs for i in _list])
       self.assertTrue(0 in a)
       self.assertTrue(1 in a)
@@ -124,8 +124,14 @@ class TestRetrieverAndRanker(unittest.TestCase):
     
   def test_eval_single_genre(self):
     '''
-    evaluate the test users who have only rated movies a 5 that have a single genre and that those movies they've rated
-    all have the same single genre.
+    evaluate the test users who were derived from the first ratings partition filtered for rating > 5
+    and when grouped by user, each further filtered user had a movie list with 1 unique genre.
+    The resulting number of unique users is small, 19, but they have characteristics that are easier to
+    predict for an enrichment evaluation using the hypergeometric survivial function.
+    The goal is to understand whether the embeddings find good recommendations for these easy to understand
+    test users.
+    
+    standard Learning To Rank (LTR) information retrieval metrics are also calculated.
     '''
     import polars as pl
     
@@ -164,9 +170,9 @@ class TestRetrieverAndRanker(unittest.TestCase):
     
     res_hg  = collections.defaultdict(list)
     results_user_hg = collections.defaultdict(list)
-    res_ndcg = {}
-    res_mrr = {}
-    res_recall = {}
+    res_ndcg = collections.defaultdict(list)
+    res_mrr = collections.defaultdict(list)
+    res_recall = collections.defaultdict(list)
     hit_rate = collections.defaultdict(float)
     mean_ap = collections.defaultdict(float)
     users_inp  = test_users_df.to_dicts()
@@ -236,9 +242,9 @@ class TestRetrieverAndRanker(unittest.TestCase):
           else:
             y_genre.append(0)
           y_pred.append(1)
-        recall_at_n = k / N_draws #TP/len(ground_truth_positives)
-        mrr = 1.0/min(ranks) if len(ranks) else 0.0
-        ndcg_at_n = ndcg_score([y_genre], [y_pred], k=len(y_genre))
+        res_recall[top_k].append(k / N_draws) #TP/len(ground_truth_positives)
+        res_mrr[top_k].append(1.0/min(ranks) if len(ranks) else 0.0)
+        res_ndcg[top_k].append(ndcg_score([y_genre], [y_pred], k=len(y_genre)))
         
         # ===== Learning to Rank evaluation =====
         # from perspective of test data acquired after train data
@@ -269,11 +275,20 @@ class TestRetrieverAndRanker(unittest.TestCase):
       hit_rate[top_k] /= len(results_user_hg)
       mean_ap[top_k] /= len(results_user_hg)
     
-    print(f'hgeom p_values={res_hg}')
-    print(f'results_user_hg={results_user_hg}')
+    for top_k in hit_rate.keys():
+      print(f'top_k={top_k}, hit_rates={hit_rate[top_k]}')
+    for top_k in mean_ap.keys():
+      print(f'top_k={top_k}, mean_ap={mean_ap[top_k]}')
+    for top_k in res_ndcg.keys():
+      print(f'top_k={top_k}, NDCG@k={res_ndcg[top_k]}')
+    for top_k in res_mrr.keys():
+      print(f'top_k={top_k}, MRR={res_mrr[top_k]}')
+    for top_k in res_recall.keys():
+      print(f'top_k={top_k}, recall@k={res_recall[top_k]}')
+    
     for top_k in res_hg.keys():
       statistic, global_p_value = combine_pvalues(res_hg[top_k], method='fisher')
-      print(f'top_k={top_k}, stat={statistic}, global p_value={global_p_value}')
+      print(f'top_k={top_k}, stat={statistic}, global hypergeom.sf p_value={global_p_value}')
     # TODO: for each stat overplot curves of stat vs top_k
       
   def read_movies_file_into_genre_dict(self, filter_for_single:bool=True) -> Tuple[collections.defaultdict(list), int]:

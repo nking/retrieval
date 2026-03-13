@@ -6,6 +6,8 @@ from typing import Tuple
 from scipy.stats import hypergeom, combine_pvalues
 from sklearn.metrics import ndcg_score, average_precision_score
 import numpy as np
+import plotly.express as px  #needs kaleido to write pngs
+from plotly.subplots import make_subplots
 
 from helper import *
 from movie_lens_retrieval.RetrieverAndRanker import RetrieverAndRanker
@@ -127,7 +129,7 @@ class TestRetrieverAndRanker(unittest.TestCase):
     evaluate the test users who were derived from the first ratings partition filtered for rating > 5
     and when grouped by user, each further filtered user had a movie list with 1 unique genre.
     The resulting number of unique users is small, 19, but they have characteristics that are easier to
-    predict for an enrichment evaluation using the hypergeometric survivial function.
+    predict for an enrichment evaluation using the hypergeometric survival function.
     The goal is to understand whether the embeddings find good recommendations for these easy to understand
     test users.
     
@@ -152,15 +154,22 @@ class TestRetrieverAndRanker(unittest.TestCase):
     #train dataset:
     ratings_seen_df = pl.read_parquet(os.path.join(get_project_dir(),
       "src/test/resources/data/sorted_1/ratings_sorted_1_joined-*.parquet"))
+    n_ratings_train = ratings_seen_df.shape[0]
+    n_unique_genres_comb_train = ratings_seen_df['genres'].unique().shape[0]
     ratings_seen_df = ratings_seen_df.filter(pl.col('user_id').is_in(test_users_df['user_id'].implode()))
     print(f'ratings seen {ratings_seen_df.count()}')
     
     #test dataset:
     ratings_unseen_df = pl.read_parquet(os.path.join(get_project_dir(),
       "src/test/resources/data/sorted_2/ratings_sorted_2_joined-*.parquet"))
+    n_unique_genres_comb_test = ratings_unseen_df['genres'].unique().shape[0]
+    n_ratings_test = ratings_unseen_df.shape[0]
     ratings_unseen_df = ratings_unseen_df.filter(
       pl.col('user_id').is_in(test_users_df['user_id'].implode()))
     print(f'ratings unseen {ratings_unseen_df.count()}')
+    print(f'number of unique genre combinations in train and test are = '
+          f'{n_unique_genres_comb_train}, {n_unique_genres_comb_test} respectively '
+          f'for numbers of ratings = {n_ratings_train}, {n_ratings_test}')
     
     #dict of (key=genre, value=list of movie_ids), N = total number of movies
     g_m_ht, N = self.read_movies_file_into_genre_dict()
@@ -172,9 +181,15 @@ class TestRetrieverAndRanker(unittest.TestCase):
     results_user_hg = collections.defaultdict(list)
     res_ndcg = collections.defaultdict(list)
     res_mrr = collections.defaultdict(list)
+    res_mrr_d = collections.defaultdict(list)
     res_recall = collections.defaultdict(list)
-    hit_rate = collections.defaultdict(float)
-    mean_ap = collections.defaultdict(float)
+    res_hit_rate = collections.defaultdict(float)
+    res_avoidance_hit_rate = collections.defaultdict(float)
+    res_mean_ap_per_user = collections.defaultdict(list)
+    res_mean_ap = collections.defaultdict(float)
+    res_rec_frac_of_neg_per_user = collections.defaultdict(list)
+    res_rec_frac_of_neg = collections.defaultdict(float)
+
     users_inp  = test_users_df.to_dicts()
     for top_k in [20, 50, 100, 200]:
       sim_movies = rr.get_movies_given_users(users_inp, top_k=top_k)
@@ -200,6 +215,7 @@ class TestRetrieverAndRanker(unittest.TestCase):
         
         #the users were derived from ratings > 4
         test_data_liked = test_data.filter(pl.col('rating') > 3)
+        test_data_disliked = test_data.filter(pl.col('rating') < 3)
         
         recommended = list(set(sim_movies[i]) - set(seen))
         inp = {**user_inp}
@@ -230,6 +246,7 @@ class TestRetrieverAndRanker(unittest.TestCase):
         
         k = 0
         ranks = [] # a list of positions of the k movies. e.g., if the 1st and 3rd recs were the right genre, ranks = [1, 3]
+        negative_ranks = [] # rank of any recommendation that the user rated 1 or 2
         y_genre = [] # 1's for recommened and of expected genre, 0's for recommended and not of expected genre
         y_pred = [] # 1's for recommended movies
         for i, movie_id in enumerate(sorted_recommended_movies):
@@ -242,15 +259,22 @@ class TestRetrieverAndRanker(unittest.TestCase):
           else:
             y_genre.append(0)
           y_pred.append(1)
+          if test_data_liked.select(pl.col('movie_id').is_in([movie_id]).any()).item() > 0:
+            negative_ranks.append(i+1)
         res_recall[top_k].append(k / N_draws) #TP/len(ground_truth_positives)
         res_mrr[top_k].append(1.0/min(ranks) if len(ranks) else 0.0)
+        res_mrr_d[top_k].append(1.0 / min(negative_ranks) if len(negative_ranks) else 0.0)
         res_ndcg[top_k].append(ndcg_score([y_genre], [y_pred], k=len(y_genre)))
+        res_rec_frac_of_neg_per_user[top_k].append(len(negative_ranks)/len(y_pred))
+        #NOTE: can use negative ranking to calculate a Rank-Biased Toxicity / Penalty
         
         # ===== Learning to Rank evaluation =====
         # from perspective of test data acquired after train data
         #Hit Rate: at least one of the recommended movies contains at least one of the test movies
         if test_data_liked.select(pl.col('movie_id').is_in(recommended).sum()).item() > 0:
-          hit_rate[top_k] += 1.
+          res_hit_rate[top_k] += 1.
+        if test_data_disliked.select(pl.col('movie_id').is_in(recommended).sum()).item() > 0:
+          res_avoidance_hit_rate[top_k] += 1
         #TODO: add Expected Reciprocal Rank (ERR) from ranx
         #Mean Average Precision (MAP)
         # ground truth is test_data_liked
@@ -270,26 +294,54 @@ class TestRetrieverAndRanker(unittest.TestCase):
           if not test_data_liked.filter(pl.col("movie_id") == recommended[i]).is_empty():
             y_true_binary.append(0)
             y_scores.append(preds[i])
-        mean_ap[top_k] += average_precision_score(y_true_binary, y_scores)
+        res_mean_ap_per_user[top_k].append(average_precision_score(y_true_binary, y_scores))
         
-      hit_rate[top_k] /= len(results_user_hg)
-      mean_ap[top_k] /= len(results_user_hg)
+      res_hit_rate[top_k] /= len(results_user_hg) # denom is number of users
+      res_mean_ap[top_k] = np.mean(res_mean_ap_per_user[top_k])
+      res_rec_frac_of_neg[top_k] = np.mean(res_rec_frac_of_neg_per_user[top_k])
     
-    for top_k in hit_rate.keys():
-      print(f'top_k={top_k}, hit_rates={hit_rate[top_k]}')
-    for top_k in mean_ap.keys():
-      print(f'top_k={top_k}, mean_ap={mean_ap[top_k]}')
+    # NOTE: to compare models, use the means over users for these plots, overl plotting model A, B, C values to find which
+    # has highest MAP with lowest rec fract negatives
+    fig = make_subplots(rows=2, cols=2, subplot_titles=("TopK=20", "TopK=50", "TopK=100", "TopK=200"),
+      x_title="MAP", y_title="% recs with negs")
+    for i, top_k in enumerate([20,50, 100,200]):
+      fig_i = px.scatter(x=res_mean_ap_per_user[top_k], y=res_rec_frac_of_neg_per_user[top_k])
+      fig_i.update_layout(title=f'k={top_k}', xaxis_title='MAP', yaxis_title='% recs with negs')
+      row_idx = i // 2
+      col_idx = i % 2
+      for trace in fig_i.data:
+        fig.add_trace(trace, row=row_idx+1, col=col_idx+1)
+    fig.write_image(os.path.join(get_bin_dir(), "map_vs_rec_negs.png"))
+    #fig.show()
+    del fig
+    
+    for top_k in res_hit_rate.keys():
+      print(f'top_k={top_k}, hit_rates={res_hit_rate[top_k]}')
+    for top_k in res_avoidance_hit_rate.keys():
+      print(f'top_k={top_k}, avoidance_hit_rates={res_avoidance_hit_rate[top_k]}')
+    for top_k in res_mean_ap.keys():
+      print(f'top_k={top_k}, mean_ap={res_mean_ap[top_k]}')
+    for top_k in res_rec_frac_of_neg.keys():
+      print(f'top_k={top_k}, fraction of negatives in recommendations={res_rec_frac_of_neg[top_k]}')
     for top_k in res_ndcg.keys():
-      print(f'top_k={top_k}, NDCG@k={res_ndcg[top_k]}')
+      print(f'top_k={top_k}, NDCG@K={res_ndcg[top_k]}')
     for top_k in res_mrr.keys():
-      print(f'top_k={top_k}, MRR={res_mrr[top_k]}')
+      print(f'top_k={top_k}, MRR@K (1 is best)={res_mrr[top_k]}')
+    for top_k in res_mrr_d.keys():
+      print(f'top_k={top_k}, MRRD@K (dislikes in the recs. 0 is best)={res_mrr_d[top_k]}')
     for top_k in res_recall.keys():
-      print(f'top_k={top_k}, recall@k={res_recall[top_k]}')
+      print(f'top_k={top_k}, recall@K={res_recall[top_k]}')
     
     for top_k in res_hg.keys():
       statistic, global_p_value = combine_pvalues(res_hg[top_k], method='fisher')
       print(f'top_k={top_k}, stat={statistic}, global hypergeom.sf p_value={global_p_value}')
-    # TODO: for each stat overplot curves of stat vs top_k
+  
+  def test_eval_all(self):
+    '''
+    calculate and visualize for all test users the
+    standard Learning To Rank (LTR) information retrieval metrics.
+    '''
+    pass
       
   def read_movies_file_into_genre_dict(self, filter_for_single:bool=True) -> Tuple[collections.defaultdict(list), int]:
     _ct = "GZIP" if self.movie_inputs.endswith(".gz") else None

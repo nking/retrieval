@@ -124,7 +124,7 @@ class TestRetrieverAndRanker(unittest.TestCase):
     
   def test_eval_single_genre(self):
     '''
-    evaluate the test users who have only rated movies that have a single genre and that those movies they've rated
+    evaluate the test users who have only rated movies a 5 that have a single genre and that those movies they've rated
     all have the same single genre.
     '''
     import polars as pl
@@ -141,7 +141,7 @@ class TestRetrieverAndRanker(unittest.TestCase):
       "src/test/resources/data/single_genre/users_single_genre.parquet"))
     test_users_df = test_users_df.drop('zipcode')
     # columns=['user_id', 'gender', 'age', 'occupation', 'zipcode']
-    n_users = test_users_df['user_id'].count()
+    print(f'test_users_df.count: {test_users_df.count()}')
     
     #train dataset:
     ratings_seen_df = pl.read_parquet(os.path.join(get_project_dir(),
@@ -163,6 +163,7 @@ class TestRetrieverAndRanker(unittest.TestCase):
     # recommendations, but we start with retrieval evals first:
     
     res_hg  = collections.defaultdict(list)
+    results_user_hg = collections.defaultdict(list)
     res_ndcg = {}
     res_mrr = {}
     res_recall = {}
@@ -183,35 +184,29 @@ class TestRetrieverAndRanker(unittest.TestCase):
             pl.col('user_id') == user_inp['user_id'])
             .select(['movie_id', 'rating'])
         )
+        if test_data.is_empty():
+          continue
         genre = ratings_seen_df.filter(
           pl.col('user_id') == user_inp['user_id'],
-          pl.col('rating') > rating_limit)
-        if genre.is_empty():
-          genre = ratings_unseen_df.filter(
-            pl.col('user_id') == user_inp['user_id'],
-            pl.col('rating') > rating_limit)
-        print(genre)
-        genre = genre.head(1)['genres'].to_numpy()[0]
+          pl.col('rating') > rating_limit).head(1)['genres'].to_numpy()[0]
+        genre = genre.encode('utf-8')
+        print(f'user_id={user_inp["user_id"]}, genre={genre}, n_test={test_data.height}')
         
+        #the users were derived from ratings > 4
         test_data_liked = test_data.filter(pl.col('rating') > 3)
-        n_seen = len(seen)
-        n_test = test_data['movie_id'].count()
-        recommended = set(sim_movies[i])
-        recommended = list(recommended - set(seen))
+        
+        recommended = list(set(sim_movies[i]) - set(seen))
         inp = {**user_inp}
         inp['movie_id'] = recommended
         inp['genres'] = rr.movie_genres_ht.lookup(tf.constant(recommended, dtype=tf.int64)).numpy().tolist()
         preds = rr.get_predictions(inp)
         
-        sorted_comb = sorted(zip(preds, recommended))
-        sorted_ratings, sorted_movies = zip(*sorted_comb)
-        
         ## === enrichment analysis ===
         
         # M = total number of movies in entire db minus already seen
-        M = N - n_seen
+        M = N - len(seen)
         # n_successes is K_genre = total number of movies in db belonging to the user's single genre, excluding n_seen
-        n_successes = len( set(g_m_ht[genre]) - set(seen))
+        n_successes = len(g_m_ht[genre]) - len(seen)
         # N_draws  = number of recommendations generated for the user (top-k)
         N_draws = len(recommended)
         # k_observed = number of movies in the top-k recommendations that belong to that specific genre
@@ -220,28 +215,35 @@ class TestRetrieverAndRanker(unittest.TestCase):
         # high p_value when embedding finds good recommendations
         # low p_value suggests randomly choosing recommendations
         res_hg[top_k].append(p_value)
+        # store by user too to more easily see user based probabilities
+        results_user_hg[user_inp['user_id']].append(p_value)
+        
+        ## ======= information retrieval metrics =====
+        sorted_comb = sorted(zip(preds, recommended))
+        sorted_ratings, sorted_recommended_movies = zip(*sorted_comb)
         
         k = 0
         ranks = [] # a list of positions of the k movies. e.g., if the 1st and 3rd recs were the right genre, ranks = [1, 3]
-        y_genre = []
-        y_pred = []
-        for i, movie_id in enumerate(sorted_movies):
-          g = rr.movie_genres_ht.lookup(movie_id)
-          if g == genre:
+        y_genre = [] # 1's for recommened and of expected genre, 0's for recommended and not of expected genre
+        y_pred = [] # 1's for recommended movies
+        for i, movie_id in enumerate(sorted_recommended_movies):
+          g = rr.movie_genres_ht.lookup(tf.constant(movie_id, dtype=tf.int64))
+          #if genre == g:  # loosened to count if any genre in list matches genre
+          if tf.strings.regex_full_match(g, f".*{genre.decode()}.*").numpy():
             k += 1
             ranks.append(i+1)
             y_genre.append(1)
           else:
             y_genre.append(0)
           y_pred.append(1)
-        recall_at_n = k / K
+        recall_at_n = k / N_draws #TP/len(ground_truth_positives)
         mrr = 1.0/min(ranks) if len(ranks) else 0.0
         ndcg_at_n = ndcg_score([y_genre], [y_pred], k=len(y_genre))
+        
         # ===== Learning to Rank evaluation =====
         # from perspective of test data acquired after train data
         #Hit Rate: at least one of the recommended movies contains at least one of the test movies
-        test_in_recommended = test_data_liked.filter(pl.col('movie_id').is_in(recommended))
-        if test_in_recommended['movie_id'].count() > 0:
+        if test_data_liked.select(pl.col('movie_id').is_in(recommended).sum()).item() > 0:
           hit_rate[top_k] += 1.
         #TODO: add Expected Reciprocal Rank (ERR) from ranx
         #Mean Average Precision (MAP)
@@ -263,12 +265,15 @@ class TestRetrieverAndRanker(unittest.TestCase):
             y_true_binary.append(0)
             y_scores.append(preds[i])
         mean_ap[top_k] += average_precision_score(y_true_binary, y_scores)
-      hit_rate[top_k] /= n_users
-      mean_ap[top_k] /= n_users
+        
+      hit_rate[top_k] /= len(results_user_hg)
+      mean_ap[top_k] /= len(results_user_hg)
     
+    print(f'hgeom p_values={res_hg}')
+    print(f'results_user_hg={results_user_hg}')
     for top_k in res_hg.keys():
-      statistic, global_p_value = combine_pvalues(res_hg[top_key], method='fisher')
-      
+      statistic, global_p_value = combine_pvalues(res_hg[top_k], method='fisher')
+      print(f'top_k={top_k}, stat={statistic}, global p_value={global_p_value}')
     # TODO: for each stat overplot curves of stat vs top_k
       
   def read_movies_file_into_genre_dict(self, filter_for_single:bool=True) -> Tuple[collections.defaultdict(list), int]:

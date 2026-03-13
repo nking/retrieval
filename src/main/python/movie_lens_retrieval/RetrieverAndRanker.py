@@ -168,11 +168,19 @@ class RetrieverAndRanker:
       "genres": tf.io.FixedLenFeature(shape=[], dtype=tf.string, default_value=None)}
     def parse_tf_example(example_proto, feature_spec):
       return tf.io.parse_single_example(example_proto, feature_spec)
-    ds = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+    def clean_genres(features):
+      features['genres'] = tf.strings.regex_replace(input=features['genres'],
+        pattern="Children's",rewrite="Children")
+      return features
+    ds = ds_ser.map(lambda x: parse_tf_example(x, feature_spec)).batch(batch_size)
+    #unfortunately, my data pre-processing is part of the TFX pipeline, and this is not the transformed data, its
+    # the raw, so insert clean_genres here..  TODO: consider refactoring to use the model's transform signature here
+    ds = ds.map(clean_genres, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
     ids = []
     i = 0
     genres = []
-    for batch in ds.batch(batch_size):
+    for batch in ds:
       ids.append(batch["movie_id"])
       genres.append(batch["genres"])
       i += len(batch["movie_id"])

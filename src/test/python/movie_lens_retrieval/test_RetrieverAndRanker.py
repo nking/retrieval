@@ -25,9 +25,9 @@ class TestRetrieverAndRanker(unittest.TestCase):
     self.user_inputs = os.path.join(get_project_dir(),
       "src/test/resources/data/user_emb_inp/tfrecord*.gz")
     self.movies_mean_ratings_pivot = os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_and_predictions_pivot/mean_ratings_tfrecord*.gz")
+      "src/test/resources/data/ratings_bayesian_shrinkage/mean_ratings_tfrecord*.gz")
     self.movies_predictions_pivot = os.path.join(get_project_dir(),
-      "src/test/resources/data/ratings_and_predictions_pivot/mm_predictions_tfrecord*.gz")
+      "src/test/resources/data/ratings_bayesian_shrinkage/mm_predictions_tfrecord*.gz")
     self.movies_predictions_pivot_prior_col_name = "weighted_rating"
     self.feature_spec = {"user_id": tf.io.FixedLenFeature([], tf.int64),
       "movie_id":tf.io.FixedLenFeature([], tf.int64),
@@ -184,6 +184,8 @@ class TestRetrieverAndRanker(unittest.TestCase):
     res_mrr = collections.defaultdict(list)
     res_mrr_d = collections.defaultdict(list)
     res_recall = collections.defaultdict(list)
+    res_precision = collections.defaultdict(list)
+    res_f1score = collections.defaultdict(list)
     res_hit_rate = collections.defaultdict(float)
     res_avoidance_hit_rate = collections.defaultdict(float)
     res_mean_ap_per_user = collections.defaultdict(list)
@@ -224,8 +226,7 @@ class TestRetrieverAndRanker(unittest.TestCase):
         inp['movie_id'] = recommended
         inp['genres'] = rr.movie_genres_ht.lookup(tf.constant(recommended, dtype=tf.int64)).numpy().tolist()
         inp2 = {**user_inp}
-        inp2['movie_id'] = test_data_liked[
-          'movie_id'].to_numpy().tolist()
+        inp2['movie_id'] = test_data_liked['movie_id'].to_numpy().tolist()
         if len(inp2['movie_id']) == 0:
           # they have no positive relevance items, so no need to calc MAP for them.  and to make
           # plots easier, will abandon the other stats for this point
@@ -253,16 +254,15 @@ class TestRetrieverAndRanker(unittest.TestCase):
         sorted_comb = sorted(zip(preds, recommended))
         sorted_ratings, sorted_recommended_movies = zip(*sorted_comb)
         
-        k = 0
+        tp = 0
+        fp = 0
         ranks = [] # a list of positions of the k movies. e.g., if the 1st and 3rd recs were the right genre, ranks = [1, 3]
         negative_ranks = [] # rank of any recommendation that the user rated 1 or 2
         y_genre = [] # 1's for recommened and of expected genre, 0's for recommended and not of expected genre
         y_pred = [] # 1's for recommended movies
         for ii, movie_id in enumerate(sorted_recommended_movies):
-          g = rr.movie_genres_ht.lookup(tf.constant(movie_id, dtype=tf.int64))
-          #if genre == g:  # loosened to count if any genre in list matches genre
-          if tf.strings.regex_full_match(g, f".*{genre.decode()}.*").numpy():
-            k += 1
+          if test_data_liked.select(pl.col('movie_id').is_in(sorted_recommended_movies).sum()).item()>0:
+            tp += 1
             ranks.append(ii+1)
             y_genre.append(1)
           else:
@@ -270,7 +270,13 @@ class TestRetrieverAndRanker(unittest.TestCase):
           y_pred.append(1)
           if test_data_disliked.select(pl.col('movie_id').is_in([movie_id]).any()).item() > 0:
             negative_ranks.append(ii+1)
-        res_recall[top_k].append(k / N_draws) #TP/len(ground_truth_positives)
+            fp += 1
+        tp_plus_fn = test_data_liked['movie_id'].count()
+        recall = (tp / tp_plus_fn) if tp_plus_fn > 0 else 0.0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        res_recall[top_k].append(recall) #TP/len(ground_truth_positives)
+        res_precision[top_k].append(precision)
+        res_f1score[top_k].append(2*recall*precision/(recall + precision)) if (precision > 0 and recall == 0) else 0.0
         res_mrr[top_k].append(1.0/min(ranks) if len(ranks) else 0.0)
         res_mrr_d[top_k].append(1.0 / min(negative_ranks) if len(negative_ranks) else 0.0)
         res_ndcg[top_k].append(ndcg_score([y_genre], [y_pred], k=len(y_genre)))
@@ -326,6 +332,10 @@ class TestRetrieverAndRanker(unittest.TestCase):
       print(f'MRR@{top_k} (1 is best)={[f"{x:.4f}" for x in res_mrr[top_k]]}')
     for top_k in res_mrr_d.keys():
       print(f'MRRD@{top_k} (dislikes in the recs. 0 is best)={[f"{x:.4f}" for x in res_mrr_d[top_k]]}')
+    for top_k in res_precision.keys():
+      print(f'precision@{top_k}={[f"{x:.4f}" for x in res_precision[top_k]]}')
+    for top_k in res_f1score.keys():
+      print(f'f1-score@{top_k}={[f"{x:.4f}" for x in res_f1score[top_k]]}')
     for top_k in res_recall.keys():
       print(f'recall@{top_k}={[f"{x:.4f}" for x in res_recall[top_k]]}')
     for top_k in res_hg.keys():
@@ -334,18 +344,19 @@ class TestRetrieverAndRanker(unittest.TestCase):
     for top_k in res_hg.keys():
       statistic, global_p_value = combine_pvalues(res_hg[top_k], method='fisher')
       print(f'top_k={top_k}, stat={statistic:.4f}, global hypergeom.sf p_value={global_p_value:.4f}')
+      #for better than random, p_value should be smaller than 0.05
       
     '''
     in the test ratings, only 2 of the 19 have ratings
     prints:
-    hit_rates@20=0.0000
-    hit_rates@50=0.5000
-    hit_rates@100=0.5000
+    hit_rates@20=1.0000
+    hit_rates@50=1.0000
+    hit_rates@100=1.0000
     hit_rates@200=1.0000
     avoidance_hit_rates@20=0.0000
     avoidance_hit_rates@50=0.0000
     avoidance_hit_rates@100=0.0000
-    avoidance_hit_rates@200=1.0000
+    avoidance_hit_rates@200=0.0000
     mean_ap@20=1.0000
     mean_ap@50=1.0000
     mean_ap@100=1.0000
@@ -353,31 +364,35 @@ class TestRetrieverAndRanker(unittest.TestCase):
     fraction of negatives in recommendations@20=0.0000
     fraction of negatives in recommendations@50=0.0000
     fraction of negatives in recommendations@100=0.0000
-    fraction of negatives in recommendations@200=0.0025
-    NDCG@20=['0.7748', '0.0000']
-    NDCG@50=['0.8542', '0.4374']
-    NDCG@100=['0.8970', '0.4776']
-    NDCG@200=['0.8941', '0.6006']
-    MRR@20 (1 is best)=['1.0000', '0.0000']
+    fraction of negatives in recommendations@200=0.0000
+    NDCG@20=['1.0000', '1.0000']
+    NDCG@50=['1.0000', '1.0000']
+    NDCG@100=['1.0000', '1.0000']
+    NDCG@200=['1.0000', '1.0000']
+    MRR@20 (1 is best)=['1.0000', '1.0000']
     MRR@50 (1 is best)=['1.0000', '1.0000']
-    MRR@100 (1 is best)=['1.0000', '0.1667']
-    MRR@200 (1 is best)=['0.5000', '0.3333']
+    MRR@100 (1 is best)=['1.0000', '1.0000']
+    MRR@200 (1 is best)=['1.0000', '1.0000']
     MRRD@20 (dislikes in the recs. 0 is best)=['0.0000', '0.0000']
     MRRD@50 (dislikes in the recs. 0 is best)=['0.0000', '0.0000']
     MRRD@100 (dislikes in the recs. 0 is best)=['0.0000', '0.0000']
-    MRRD@200 (dislikes in the recs. 0 is best)=['0.0000', '0.0270']
-    recall@20=['0.5000', '0.0000']
-    recall@50=['0.6200', '0.1000']
-    recall@100=['0.6900', '0.1100']
-    recall@200=['0.6500', '0.1750']
-    hypergeom.sf@20=['0.0479', '1.0000']
-    hypergeom.sf@50=['0.0003', '1.0000']
-    hypergeom.sf@100=['0.0000', '1.0000']
-    hypergeom.sf@200=['0.0000', '0.9995']
-    top_k=20, stat=6.0774, global hypergeom.sf p_value=0.1934
-    top_k=50, stat=16.2711, global hypergeom.sf p_value=0.0027
-    top_k=100, stat=42.0993, global hypergeom.sf p_value=0.0000
-    top_k=200, stat=62.8023, global hypergeom.sf p_value=0.0000
+    MRRD@200 (dislikes in the recs. 0 is best)=['0.0000', '0.0000']
+    precision@20=['1.0000', '1.0000']
+    precision@50=['1.0000', '1.0000']
+    precision@100=['1.0000', '1.0000']
+    precision@200=['1.0000', '1.0000']
+    recall@20=['0.2151', '0.2817']
+    recall@50=['0.5376', '0.7042']
+    recall@100=['1.0753', '1.4085']
+    recall@200=['2.1505', '2.8028']
+    hypergeom.sf@20=['0.0002', '0.0000']
+    hypergeom.sf@50=['0.0003', '0.0000']
+    hypergeom.sf@100=['0.0000', '0.0000']
+    hypergeom.sf@200=['0.0000', '0.0000']
+    top_k=20, stat=44.0937, global hypergeom.sf p_value=0.0000
+    top_k=50, stat=45.5319, global hypergeom.sf p_value=0.0000
+    top_k=100, stat=79.5400, global hypergeom.sf p_value=0.0000
+top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
     also see bin directory for scatter plots
     '''
     
@@ -426,6 +441,8 @@ class TestRetrieverAndRanker(unittest.TestCase):
     res_mrr = collections.defaultdict(list)
     res_mrr_d = collections.defaultdict(list)
     res_recall = collections.defaultdict(list)
+    res_precision = collections.defaultdict(list)
+    res_f1score = collections.defaultdict(list)
     res_hit_rate = collections.defaultdict(float)
     res_avoidance_hit_rate = collections.defaultdict(float)
     res_mean_ap_per_user = collections.defaultdict(list)
@@ -457,15 +474,19 @@ class TestRetrieverAndRanker(unittest.TestCase):
         test_data_disliked = test_data.filter(pl.col('rating') < 3)
         
         recommended = list(set(sim_movies[i]) - set(seen))
+        if len(recommended) == 0:
+          print(f'WARNING: no recommended *unseen* movies for user_id={user_inp["user_id"]}')
+          continue
         inp = {**user_inp}
-        inp['movie_id'] = recommended
         inp2 = {**user_inp}
+        inp['movie_id'] = recommended
         inp2['movie_id'] = test_data_liked['movie_id'].to_numpy().tolist()
         if len(inp2['movie_id']) == 0:
           #they have no positive relevance items, so no need to calc MAP for them.  and to make
-          # plots easier, will abandon the other stats for this point
+          # plots easier, will abandon the other stats for this user
           continue
-        inp['genres'] = rr.movie_genres_ht.lookup(tf.constant(recommended, dtype=tf.int64)).numpy().tolist()
+
+        inp['genres'] = rr.movie_genres_ht.lookup(tf.constant(inp['movie_id'], dtype=tf.int64)).numpy().tolist()
         #inp['genres'] = [g.decode() for g in inp['genres']]
         preds = rr.get_predictions(inp)
         
@@ -474,7 +495,8 @@ class TestRetrieverAndRanker(unittest.TestCase):
         sorted_ratings, sorted_recommended_movies = zip(*sorted_comb)
         
         test_data_liked_intersect_reccomendations = test_data_liked.filter(pl.col('movie_id').is_in(recommended))
-        k = 0
+        tp = 0
+        fp = 0
         ranks = [] # a list of positions of the k movies. e.g., if the 1st and 3rd recs were the right genre, ranks = [1, 3]
         negative_ranks = [] # rank of any recommendation that the user rated 1 or 2
         y_genre = [] # 1's for recommened and of expected genre, 0's for recommended and not of expected genre
@@ -482,7 +504,7 @@ class TestRetrieverAndRanker(unittest.TestCase):
         for ii, movie_id in enumerate(sorted_recommended_movies):
           #if genre == g:  # loosened to count if any genre in list matches genre
           if test_data_liked_intersect_reccomendations.select(pl.col('movie_id').is_in([movie_id]).sum()).item() > 0:
-            k += 1
+            tp += 1
             ranks.append(ii+1)
             y_genre.append(1)
           else:
@@ -490,10 +512,20 @@ class TestRetrieverAndRanker(unittest.TestCase):
           y_pred.append(1)
           if test_data_disliked.select(pl.col('movie_id').is_in([movie_id]).any()).item() > 0:
             negative_ranks.append(ii+1)
-        res_recall[top_k].append(k / len(y_pred)) #TP/len(ground_truth_positives...limiting to number of draws)
+            fp += 1
+        tp_plus_fn = test_data_liked['movie_id'].count()
+        recall = (tp / tp_plus_fn) if tp_plus_fn>0 else 0.0
+        precision = tp / (tp + fp) if (tp+fp) > 0 else 0.0
+        res_recall[top_k].append(recall)  # TP/len(ground_truth_positives)
+        res_precision[top_k].append(precision)
+        res_f1score[top_k].append(2 * recall * precision / (recall + precision)) if (recall > 0 and precision >0) else 0.0 # 2/((1/p)+(1/r)) = 2*p*r/(p+r)
+        res_recall[top_k].append(tp / len(y_pred)) #TP/len(ground_truth_positives...limiting to number of draws)
         res_mrr[top_k].append(1.0/min(ranks) if len(ranks) else 0.0)
         res_mrr_d[top_k].append(1.0 / min(negative_ranks) if len(negative_ranks) else 0.0)
-        res_ndcg[top_k].append(ndcg_score([y_genre], [y_pred], k=len(y_genre)))
+        if len(y_genre) > 1:
+          res_ndcg[top_k].append(ndcg_score([y_genre], [y_pred], k=len(y_genre)))
+        elif len(y_genre) == 1:
+          res_ndcg[top_k].append(y_genre[0])
         res_rec_frac_of_neg_per_user[top_k].append(len(negative_ranks)/len(y_pred))
         #NOTE: can use negative ranking to calculate a Rank-Biased Toxicity / Penalty
       
@@ -549,9 +581,13 @@ class TestRetrieverAndRanker(unittest.TestCase):
       print(f'MRR@{top_k} (1 is best)={np.mean(res_mrr[top_k]):.4f}')
     for top_k in res_mrr_d.keys():
       print(f'MRRD@{top_k} (dislikes in the recs. 0 is best)={np.mean(res_mrr_d[top_k]):.4f}')
+    for top_k in res_precision.keys():
+      print(f'precision@{top_k}={np.mean(res_precision[top_k]):.4f}')
     for top_k in res_recall.keys():
       print(f'recall@{top_k}={np.mean(res_recall[top_k]):.4f}')
-    
+    for top_k in res_f1score.keys():
+      print(f'f1score@{top_k}={np.mean(res_f1score[top_k]):.4f}')
+      
     for top_k in res_hg.keys():
       statistic, global_p_value = combine_pvalues(res_hg[top_k], method='fisher')
       print(f'top_k={top_k}, stat={statistic:.4f}, global hypergeom.sf p_value={global_p_value:.4f}')
@@ -565,38 +601,46 @@ class TestRetrieverAndRanker(unittest.TestCase):
     return data[max(0, low_idx)], data[min(n - 1, high_idx)]
   '''
   prints:
-  top_k=20, NDCG@K=0.0, CI=(np.float64(0.0), np.float64(0.0))
-  top_k=50, NDCG@K=0.0, CI=(np.float64(0.0), np.float64(0.0))
-  top_k=100, NDCG@K=0.21120743497528213, CI=(np.float64(0.20998465041471973), np.float64(0.21376725085190157))
-  top_k=200, NDCG@K=0.23733485963340378, CI=(np.float64(0.21892295462205238), np.float64(0.24509065543880829))
-  hit_rates@20=0.2883
-  hit_rates@50=0.4449
-  hit_rates@100=0.6084
-  hit_rates@200=0.7798
-  avoidance_hit_rates@20=74.0000
-  avoidance_hit_rates@50=153.0000
-  avoidance_hit_rates@100=267.0000
-  avoidance_hit_rates@200=446.0000
+  top_k=20, NDCG@K=0.3585577964856083, CI=(np.float64(0.35201341909617556), np.float64(0.3732830003941271))
+  top_k=50, NDCG@K=0.36315789425486417, CI=(np.float64(0.34002177795720856), np.float64(0.36315789425486417))
+  top_k=100, NDCG@K=0.35507819559389053, CI=(np.float64(0.3391670315780155), np.float64(0.360302842504506))
+  top_k=200, NDCG@K=0.3522790152749294, CI=(np.float64(0.3465735254956256), np.float64(0.36827240125846333))
+  hit_rates@20=0.2913
+  hit_rates@50=0.3763
+  hit_rates@100=0.4234
+  hit_rates@200=0.4560
+  avoidance_hit_rates@20=95.0000
+  avoidance_hit_rates@50=211.0000
+  avoidance_hit_rates@100=330.0000
+  avoidance_hit_rates@200=493.0000
   mean_ap@20=1.0000
   mean_ap@50=1.0000
   mean_ap@100=1.0000
   mean_ap@200=1.0000
-  fraction of negatives in recommendations@20=0.0029
-  fraction of negatives in recommendations@50=0.0025
-  fraction of negatives in recommendations@100=0.0025
-  fraction of negatives in recommendations@200=0.0025
-  MRR@20 (1 is best)=0.0734
-  MRR@50 (1 is best)=0.0767
-  MRR@100 (1 is best)=0.0963
-  MRR@200 (1 is best)=0.1078
-  MRRD@20 (dislikes in the recs. 0 is best)=0.0093
-  MRRD@50 (dislikes in the recs. 0 is best)=0.0093
-  MRRD@100 (dislikes in the recs. 0 is best)=0.0121
-  MRRD@200 (dislikes in the recs. 0 is best)=0.0128
-  recall@20=0.0335
-  recall@50=0.0307
-  recall@100=0.0315
-  recall@200=0.0323
+  fraction of negatives in recommendations@20=0.0042
+  fraction of negatives in recommendations@50=0.0040
+  fraction of negatives in recommendations@100=0.0037
+  fraction of negatives in recommendations@200=0.0034
+  MRR@20 (1 is best)=0.2140
+  MRR@50 (1 is best)=0.1855
+  MRR@100 (1 is best)=0.1674
+  MRR@200 (1 is best)=0.1358
+  MRRD@20 (dislikes in the recs. 0 is best)=0.0113
+  MRRD@50 (dislikes in the recs. 0 is best)=0.0188
+  MRRD@100 (dislikes in the recs. 0 is best)=0.0129
+  MRRD@200 (dislikes in the recs. 0 is best)=0.0153
+  precision@20=0.5700
+  precision@50=0.7280
+  precision@100=0.8153
+  precision@200=0.8684
+  recall@20=0.0749
+  recall@50=0.0915
+  recall@100=0.1144
+  recall@200=0.1526
+  f1score@20=0.1100
+  f1score@50=0.1854
+  f1score@100=0.2684
+  f1score@200=0.3793
   see bin directory for histogram and scatter plots
   '''
   

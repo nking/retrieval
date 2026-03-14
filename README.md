@@ -36,6 +36,6 @@ Local testing:
   
 Misc:
   the cold start, bayesian shrinkage could redone regularly.
-  the code is in the reocmmendations project.
+  the code is in the recommendations project.
   could use for the "m" estimate of 0.75 quantile,
   data sketches like q-digest or t-digest on live data.

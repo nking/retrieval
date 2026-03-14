@@ -79,9 +79,9 @@ def create_retrievalreranker():
   user_inputs = os.path.join(get_project_dir(),
     "src/test/resources/data/user_emb_inp/tfrecord*.gz")
   movies_mean_ratings_pivot = os.path.join(get_project_dir(),
-    "src/test/resources/data/ratings_and_predictions_pivot/mean_ratings_tfrecord*.gz")
+    "src/test/resources/data/ratings_bayesian_shrinkage/mean_ratings_tfrecord*.gz")
   movies_predictions_pivot = os.path.join(get_project_dir(),
-    "src/test/resources/data/ratings_and_predictions_pivot/mm_predictions_tfrecord*.gz")
+    "src/test/resources/data/ratings_bayesian_shrinkage/mm_predictions_tfrecord*.gz")
   rr = RetrieverAndRanker(user_movie_saved_model_dir = user_movie_models_dir,
     movies_path = movie_inputs, users_path=user_inputs,
     movies_pivot_path=movies_mean_ratings_pivot,

@@ -668,7 +668,7 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
   def make_ndcg_histogram(TOP_KS:list, res_ndcg_per_user, filename:str, show:bool=False):
     fig = make_subplots(rows=2, cols=2,
       subplot_titles=("TopK=20", "TopK=50", "TopK=100", "TopK=200"),
-      x_title="count", y_title="NDCG@K")
+      x_title="NDCG@K", y_title="count")
     for i, top_k in enumerate(TOP_KS):
       fig_i = px.histogram(res_ndcg_per_user[top_k], nbins=50, title=f"NDCG@{top_k} Histogram")
       row_idx = i // 2

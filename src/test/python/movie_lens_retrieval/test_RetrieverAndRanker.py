@@ -431,7 +431,11 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
       movies_pivot_path=self.movies_mean_ratings_pivot,
       max_k=1000, movies_batch_size=256)
     
-    writer = ArrayRecordWriter(os.path.join(get_bin_dir(), "user_recommendations.array_record"))
+    #for fast random access, set group_size to 1
+    writer = ArrayRecordWriter(os.path.join(get_bin_dir(),
+        "user_recommendations_all.array_record"), 'group_size:1')
+    writer2 = ArrayRecordWriter(os.path.join(get_bin_dir(),
+        "user_recommendations_disliked.array_record"), 'group_size:1')
     
     test_users_df = pl.read_parquet(os.path.join(get_project_dir(),
       "src/test/resources/data/users/users.parquet"))
@@ -477,11 +481,12 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
     for top_k in TOP_KS:
       res_avoidance_hit_rate[top_k] = 0.
       sim_movies = rr.get_movies_given_users(users_inp, top_k=top_k, use_ranker=False)
-      #the sim_movies are lists returned in same order of list of input users
+      #the sim_movies are lists returned in same order of list of input users.
+      # the list of movies are sorted by descending similarity
       
       for i in range(len(sim_movies)):
         user_inp = users_inp[i]
-        seen = (
+        seen = set(
           ratings_seen_df.filter(pl.col('user_id') == user_inp['user_id'])
           .select('movie_id').to_series().to_list()
         )
@@ -490,10 +495,21 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
             pl.col('user_id') == user_inp['user_id'])
             .select(['movie_id', 'rating'])
         )
-        recommended = list(set(sim_movies[i]) - set(seen))
+        test_data_disliked = test_data.filter(pl.col('rating') < 3)
+        #perform intersection of test_data_dislike with sim_movies[i] while preservign the order in sim_movies[i]:
+        disliked_recommended = (pl.DataFrame({"movie_id": sim_movies[i]})
+            .join(test_data_disliked, on="movie_id", how="inner"
+        ))
+        #keep similarity score ordering,
+        recommended = [m for m in sim_movies[i] if m not in seen]
+        
         if top_k == 200:
             self.save_retrieval_to_arrayrecord(writer=writer,
-                user_id=user_inp['user_id'], recommended_movies=sorted(recommended))
+                user_id=user_inp['user_id'], recommended_movies=sim_movies[i])
+            if not disliked_recommended.is_empty():
+                self.save_retrieval_to_arrayrecord(writer=writer2,
+                    user_id=user_inp['user_id'],
+                    recommended_movies=disliked_recommended['movie_id'].to_numpy().tolist())
             
         if len(recommended) == 0:
             print(f'WARNING: no recommended *unseen* movies for user_id={user_inp["user_id"]}')
@@ -504,7 +520,6 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
         
         #the users were derived from ratings > 4
         test_data_liked = test_data.filter(pl.col('rating') > 3)
-        test_data_disliked = test_data.filter(pl.col('rating') < 3)
         
         inp = {**user_inp}
         inp2 = {**user_inp}
@@ -590,6 +605,7 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
     
     #TODO: equiv of try/catch/finally to close here:
     writer.close()
+    writer2.close()
     
     # NOTE: to compare models, use the means over users for these plots, overl plotting model A, B, C values to find which
     # has highest MAP with lowest rec fract negatives

@@ -479,12 +479,6 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
       sim_movies = rr.get_movies_given_users(users_inp, top_k=top_k, use_ranker=False)
       #the sim_movies are lists returned in same order of list of input users
       
-      if top_k == 200:
-          for i in range(len(sim_movies)):
-              self.save_retrieval_to_arrayrecord(
-                  writer=writer, user_id=users_inp[i]['user_id'], recommended_movies=sim_movies[i])
-          writer.close()
-
       for i in range(len(sim_movies)):
         user_inp = users_inp[i]
         seen = (
@@ -496,6 +490,15 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
             pl.col('user_id') == user_inp['user_id'])
             .select(['movie_id', 'rating'])
         )
+        recommended = list(set(sim_movies[i]) - set(seen))
+        if top_k == 200:
+            self.save_retrieval_to_arrayrecord(writer=writer,
+                user_id=user_inp['user_id'], recommended_movies=sorted(recommended))
+            
+        if len(recommended) == 0:
+            print(f'WARNING: no recommended *unseen* movies for user_id={user_inp["user_id"]}')
+            continue
+            
         if test_data.is_empty():
           continue
         
@@ -503,10 +506,6 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
         test_data_liked = test_data.filter(pl.col('rating') > 3)
         test_data_disliked = test_data.filter(pl.col('rating') < 3)
         
-        recommended = list(set(sim_movies[i]) - set(seen))
-        if len(recommended) == 0:
-          print(f'WARNING: no recommended *unseen* movies for user_id={user_inp["user_id"]}')
-          continue
         inp = {**user_inp}
         inp2 = {**user_inp}
         inp['movie_id'] = recommended
@@ -588,6 +587,9 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
       res_hit_rate[top_k] /= len(res_recall[top_k]) # denom is number of users
       res_mean_ap[top_k] = np.mean(res_mean_ap_per_user[top_k]).item()
       res_rec_frac_of_neg[top_k] = np.mean(res_rec_frac_of_neg_per_user[top_k]).item()
+    
+    #TODO: equiv of try/catch/finally to close here:
+    writer.close()
     
     # NOTE: to compare models, use the means over users for these plots, overl plotting model A, B, C values to find which
     # has highest MAP with lowest rec fract negatives

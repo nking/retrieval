@@ -7,7 +7,7 @@ from movie_lens_retrieval.RetrieverAndRanker import RetrieverAndRanker
 import os
 
 """
-formatting the data into lists for inputs for training a r-ranker with listwise ranking loss.
+formatting the data into lists for inputs for training a re-ranker with listwise ranking loss.
 
 Hard negative mining is followed to remove ratings "3" and
 to partition the rest into positive for ratings > 3 and
@@ -28,7 +28,7 @@ for each of train, validation:
       the sampled list and their genres and ratings.
 
 NOTE:
-- this could be made scalable by using Polars with lazy fram API and streaming,
+- this could be made scalable by using Polars with lazy frame API and streaming,
   and adding Fugue and Pyspark to the pipeline.   Polars is useful for designing
   the vectorized operations, among many things.
 - this could be made scalable by rewriting the transforms in TFX and beam.  The

@@ -4,12 +4,20 @@ import unittest
 import glob
 from collections import defaultdict
 from typing import Tuple
+
+import msgpack
 from scipy.stats import hypergeom, combine_pvalues
 from sklearn.metrics import ndcg_score, average_precision_score
 import polars as pl
 import numpy as np
 import plotly.express as px  #needs kaleido to write pngs
 from plotly.subplots import make_subplots
+
+import msgpack
+import msgpack_numpy as m  # Optional: helps if you have raw numpy arrays
+m.patch()  # Makes msgpack understand numpy types automatically
+import array_record
+from array_record.python.array_record_module import ArrayRecordWriter
 
 from helper import *
 from movie_lens_retrieval.RetrieverAndRanker import RetrieverAndRanker
@@ -395,11 +403,24 @@ class TestRetrieverAndRanker(unittest.TestCase):
 top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
     also see bin directory for scatter plots
     '''
-    
+  
+  
+
+  def deserialize_fn(serialized_data):
+      return msgpack.unpackb(serialized_data, raw=False)
+  
+  def save_retrieval_to_arrayrecord(self, writer:ArrayRecordWriter, user_id:int, recommended_movies:List[int]):
+      for movies in recommended_movies:
+          record = msgpack.packb({"user_id": user_id, "retrieved_ids": movies}, use_bin_type=True)
+          writer.write(record)
+      
   def test_eval_all(self):
     """
     calculate and visualize for all test users the
     standard Learning To Rank (LTR) information retrieval metrics.
+    
+    This also writes the recommendations to bin/user_recommendations as an arrayrecord, readable
+    by Grain in th reranker project.
     
     the best of these can be used in the MLOps pipeline evaluation and monitoring.
     """
@@ -409,6 +430,8 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
       movies_path=self.movie_inputs, users_path=self.user_inputs,
       movies_pivot_path=self.movies_mean_ratings_pivot,
       max_k=1000, movies_batch_size=256)
+    
+    writer = ArrayRecordWriter(os.path.join(get_bin_dir(), "user_recommendations.array_record"))
     
     test_users_df = pl.read_parquet(os.path.join(get_project_dir(),
       "src/test/resources/data/users/users.parquet"))
@@ -455,6 +478,13 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
       res_avoidance_hit_rate[top_k] = 0.
       sim_movies = rr.get_movies_given_users(users_inp, top_k=top_k, use_ranker=False)
       #the sim_movies are lists returned in same order of list of input users
+      
+      if top_k == 200:
+          for i in range(len(sim_movies)):
+              self.save_retrieval_to_arrayrecord(
+                  writer=writer, user_id=users_inp[i]['user_id'], recommended_movies=sim_movies[i])
+          writer.close()
+
       for i in range(len(sim_movies)):
         user_inp = users_inp[i]
         seen = (

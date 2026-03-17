@@ -15,9 +15,9 @@ from plotly.subplots import make_subplots
 
 import msgpack
 import msgpack_numpy as m  # Optional: helps if you have raw numpy arrays
+from hard_negative_mining_splits import train_df
 m.patch()  # Makes msgpack understand numpy types automatically
-import array_record
-from array_record.python.array_record_module import ArrayRecordWriter
+from array_record.python import array_record_module
 
 from helper import *
 from movie_lens_retrieval.RetrieverAndRanker import RetrieverAndRanker
@@ -404,12 +404,10 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
     also see bin directory for scatter plots
     '''
   
-  
-
   def deserialize_fn(serialized_data):
       return msgpack.unpackb(serialized_data, raw=False)
   
-  def save_retrieval_to_arrayrecord(self, writer:ArrayRecordWriter, user_id:int, recommended_movies:List[int]):
+  def save_retrieval_to_arrayrecord(self, writer:array_record_module.ArrayRecordWriter, user_id:int, recommended_movies:List[int]):
       for movies in recommended_movies:
           record = msgpack.packb({"user_id": user_id, "retrieved_ids": movies}, use_bin_type=True)
           writer.write(record)
@@ -432,30 +430,32 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
       max_k=1000, movies_batch_size=256)
     
     #for fast random access, set group_size to 1
-    writer = ArrayRecordWriter(os.path.join(get_bin_dir(),
-        "user_recommendations_all.array_record"), 'group_size:1')
-    writer2 = ArrayRecordWriter(os.path.join(get_bin_dir(),
-        "user_recommendations_disliked.array_record"), 'group_size:1')
+    writer1 = array_record_module.ArrayRecordWriter(os.path.join(get_bin_dir(),
+        "user_recommendations_without_train_val.array_record"), 'group_size:1')
+    writer2 = array_record_module.ArrayRecordWriter(os.path.join(get_bin_dir(),
+        "user_recommendations_disliked_in_test.array_record"), 'group_size:1')
+    writer3 = array_record_module.ArrayRecordWriter(os.path.join(get_bin_dir(),
+        "user_recommendations_disliked_in_train.array_record"),'group_size:1')
     
-    test_users_df = pl.read_parquet(os.path.join(get_project_dir(),
+    users_test_df = pl.read_parquet(os.path.join(get_project_dir(),
       "src/test/resources/data/users/users.parquet"))
-    test_users_df = test_users_df.drop('zipcode')
+    users_test_df = users_test_df.drop('zipcode')
     # columns=['user_id', 'gender', 'age', 'occupation', 'zipcode']
-    print(f'test_users_df.count: {test_users_df.count()}')
+    print(f'test_users_df.count: {users_test_df.count()}')
     
     #train dataset:
-    ratings_seen_df = pl.read_parquet(os.path.join(get_project_dir(),
+    ratings_train_df = pl.read_parquet(os.path.join(get_project_dir(),
       "src/test/resources/data/sorted_1/ratings_sorted_1_joined-*.parquet"))
-    n_ratings_train = ratings_seen_df.shape[0]
-    n_unique_genres_comb_train = ratings_seen_df['genres'].unique().shape[0]
-    print(f'ratings seen {ratings_seen_df.count()}')
+    n_ratings_train = ratings_train_df.shape[0]
+    n_unique_genres_comb_train = ratings_train_df['genres'].unique().shape[0]
+    print(f'ratings seen {ratings_train_df.count()}')
     
     #test dataset:
-    ratings_unseen_df = pl.read_parquet(os.path.join(get_project_dir(),
+    ratings_test_df = pl.read_parquet(os.path.join(get_project_dir(),
       "src/test/resources/data/sorted_2/ratings_sorted_2_joined-*.parquet"))
-    n_unique_genres_comb_test = ratings_unseen_df['genres'].unique().shape[0]
-    n_ratings_test = ratings_unseen_df.shape[0]
-    print(f'ratings unseen {ratings_unseen_df.count()}')
+    n_unique_genres_comb_test = ratings_test_df['genres'].unique().shape[0]
+    n_ratings_test = ratings_test_df.shape[0]
+    print(f'ratings unseen {ratings_test_df.count()}')
     print(f'number of unique genre combinations in train and test are = '
           f'{n_unique_genres_comb_train}, {n_unique_genres_comb_test} respectively '
           f'for numbers of ratings = {n_ratings_train}, {n_ratings_test}')
@@ -477,53 +477,70 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
     res_rec_frac_of_neg_per_user = collections.defaultdict(list)
     res_rec_frac_of_neg = collections.defaultdict(float)
 
-    users_inp = test_users_df.to_dicts()
+    users_inp = users_test_df.to_dicts()
     for top_k in TOP_KS:
       res_avoidance_hit_rate[top_k] = 0.
-      sim_movies = rr.get_movies_given_users(users_inp, top_k=top_k, use_ranker=False)
+      recommended_movies_all = rr.get_movies_given_users(users_inp, top_k=top_k, use_ranker=False)
       #the sim_movies are lists returned in same order of list of input users.
       # the list of movies are sorted by descending similarity
       
-      for i in range(len(sim_movies)):
+      for i in range(len(recommended_movies_all)):
         user_inp = users_inp[i]
-        seen = set(
-          ratings_seen_df.filter(pl.col('user_id') == user_inp['user_id'])
-          .select('movie_id').to_series().to_list()
+        train_df_for_user = (
+          ratings_train_df.filter(pl.col('user_id') == user_inp['user_id'])
+          .select(['movie_id', 'rating'])
         )
-        test_data = (
-          ratings_unseen_df.filter(
+        test_df_for_user = (
+          ratings_test_df.filter(
             pl.col('user_id') == user_inp['user_id'])
             .select(['movie_id', 'rating'])
         )
-        test_data_disliked = test_data.filter(pl.col('rating') < 3)
+        test_data_disliked = test_df_for_user.filter(pl.col('rating') < 3)
+        train_data_disliked = train_df_for_user.filter(pl.col('rating') < 3)
         #perform intersection of test_data_dislike with sim_movies[i] while preservign the order in sim_movies[i]:
-        disliked_recommended = (pl.DataFrame({"movie_id": sim_movies[i]})
+        disliked_in_test_recommended = (pl.DataFrame({"movie_id": recommended_movies_all[i]})
             .join(test_data_disliked, on="movie_id", how="inner"
         ))
+        disliked_in_train_recommended = (
+            pl.DataFrame({"movie_id": recommended_movies_all[i]})
+            .join(train_df_for_user, on="movie_id", how="inner"
+        ))
         #keep similarity score ordering,
-        recommended = [m for m in sim_movies[i] if m not in seen]
+        recommended_without_train = [m for m in recommended_movies_all[i] if m not in train_df_for_user]
+        
+        '''
+        (1) we want to write the recommendations without the already seen in train and val to file for the ranker component.
+            we want to do the same for the intersection of recommendations with "disliked in test",
+            and the same for intersection of recommendations with "disliked in train and val".
+        (2) we calculate statistics @K for the recommendations without train and val
+            and compare them to the test data.
+        '''
         
         if top_k == 200:
-            self.save_retrieval_to_arrayrecord(writer=writer,
-                user_id=user_inp['user_id'], recommended_movies=sim_movies[i])
-            if not disliked_recommended.is_empty():
+            if len(recommended_without_train) > 0:
+                self.save_retrieval_to_arrayrecord(writer=writer1,
+                    user_id=user_inp['user_id'], recommended_movies=recommended_without_train)
+            if not disliked_in_test_recommended.is_empty():
                 self.save_retrieval_to_arrayrecord(writer=writer2,
                     user_id=user_inp['user_id'],
-                    recommended_movies=disliked_recommended['movie_id'].to_numpy().tolist())
-            
-        if len(recommended) == 0:
+                    recommended_movies=disliked_in_test_recommended['movie_id'].to_list())
+            if not disliked_in_train_recommended.is_empty():
+                self.save_retrieval_to_arrayrecord(writer=writer3,
+                    user_id=user_inp['user_id'],
+                    recommended_movies=disliked_in_train_recommended['movie_id'].to_list())
+        if len(recommended_without_train) == 0:
             print(f'WARNING: no recommended *unseen* movies for user_id={user_inp["user_id"]}')
             continue
             
-        if test_data.is_empty():
+        if test_df_for_user.is_empty():
           continue
         
         #the users were derived from ratings > 4
-        test_data_liked = test_data.filter(pl.col('rating') > 3)
+        test_data_liked = test_df_for_user.filter(pl.col('rating') > 3)
         
         inp = {**user_inp}
         inp2 = {**user_inp}
-        inp['movie_id'] = recommended
+        inp['movie_id'] = recommended_without_train
         inp2['movie_id'] = test_data_liked['movie_id'].to_numpy().tolist()
         if len(inp2['movie_id']) == 0:
           #they have no positive relevance items, so no need to calc MAP for them.  and to make
@@ -535,26 +552,24 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
         preds = rr.get_predictions(inp)
         
         ## ======= information retrieval metrics =====
-        sorted_comb = sorted(zip(preds, recommended))
+        sorted_comb = sorted(zip(preds, recommended_without_train))
         sorted_ratings, sorted_recommended_movies = zip(*sorted_comb)
         
-        test_data_liked_intersect_reccomendations = test_data_liked.filter(pl.col('movie_id').is_in(recommended))
         tp = 0
         fp = 0
-        ranks = [] # a list of positions of the k movies. e.g., if the 1st and 3rd recs were the right genre, ranks = [1, 3]
+        ranks = [] # a list of positions of the k movies. e.g., if the 1st and 3rd recs were in test, ranks = [1, 3]
         negative_ranks = [] # rank of any recommendation that the user rated 1 or 2
-        y_genre = [] # 1's for recommened and of expected genre, 0's for recommended and not of expected genre
+        y_genre = [] # 1's for recommended and is in test liked, 0's for recommended and not of expected genre
         y_pred = [] # 1's for recommended movies
         for ii, movie_id in enumerate(sorted_recommended_movies):
-          #if genre == g:  # loosened to count if any genre in list matches genre
-          if test_data_liked_intersect_reccomendations.select(pl.col('movie_id').is_in([movie_id]).sum()).item() > 0:
+          if test_data_liked.select((pl.col('movie_id') == movie_id).any()).item():
             tp += 1
             ranks.append(ii+1)
             y_genre.append(1)
           else:
             y_genre.append(0)
           y_pred.append(1)
-          if test_data_disliked.select(pl.col('movie_id').is_in([movie_id]).any()).item() > 0:
+          if test_data_disliked.select((pl.col('movie_id') == movie_id).any()).item():
             negative_ranks.append(ii+1)
             fp += 1
         tp_plus_fn = test_data_liked['movie_id'].count()
@@ -576,12 +591,13 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
         # ===== Learning to Rank evaluation =====
         # from perspective of test data acquired after train data
         #Hit Rate: at least one of the recommended movies contains at least one of the test movies
-        if test_data_liked.select(pl.col('movie_id').is_in(recommended).sum()).item() > 0:
+        if test_data_liked.select((pl.col('movie_id').is_in(recommended_without_train)).any()).item():
           res_hit_rate[top_k] += 1.
-        if test_data_disliked.select(pl.col('movie_id').is_in(recommended).sum()).item() > 0:
+        if test_data_disliked.select((pl.col('movie_id').is_in(recommended_without_train)).any()).item():
           res_avoidance_hit_rate[top_k] += 1
         #TODO: add Expected Reciprocal Rank (ERR) from ranx
         #Mean Average Precision (MAP)
+        
         # ground truth is test_data_liked
         # generate predictions for them and call them predicted_Scores
         # negatives: find the movies that are in recommendations and not in test_data_liked and give those value 0
@@ -604,8 +620,9 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
       res_rec_frac_of_neg[top_k] = np.mean(res_rec_frac_of_neg_per_user[top_k]).item()
     
     #TODO: equiv of try/catch/finally to close here:
-    writer.close()
+    writer1.close()
     writer2.close()
+    writer3.close()
     
     # NOTE: to compare models, use the means over users for these plots, overl plotting model A, B, C values to find which
     # has highest MAP with lowest rec fract negatives
@@ -691,6 +708,16 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
   f1score@200=0.3793
   see bin directory for histogram and scatter plots
   '''
+  
+  def test_read_arrayrecords(self):
+      for filename in ["user_recommendations_without_train_val", "user_recommendations_disliked_in_test",
+          "user_recommendations_disliked_in_train"]:
+          filepath = os.path.join(get_bin_dir(), f'{filename}.array_record')
+          reader = array_record_module.ArrayRecordReader(filepath)
+          # read with random access
+          record:dict = msgpack.unpackb(reader.read())
+          self.assertTrue(record['user_id'] is not None)
+          self.assertTrue(record['retrieved_ids'] is not None)
   
   @staticmethod
   def make_map_vs_negative_recs(TOP_KS:list, res_mean_ap_per_user:defaultdict,

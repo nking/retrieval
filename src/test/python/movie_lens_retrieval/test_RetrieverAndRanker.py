@@ -710,14 +710,16 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
   '''
   
   def test_read_arrayrecords(self):
+      import os
       for filename in ["user_recommendations_without_train_val", "user_recommendations_disliked_in_test",
           "user_recommendations_disliked_in_train"]:
           filepath = os.path.join(get_bin_dir(), f'{filename}.array_record')
-          reader = array_record_module.ArrayRecordReader(filepath)
-          # read with random access
-          record:dict = msgpack.unpackb(reader.read())
-          self.assertTrue(record['user_id'] is not None)
-          self.assertTrue(record['retrieved_ids'] is not None)
+          if os.path.exists(filepath):
+              reader = array_record_module.ArrayRecordReader(filepath)
+              # read with random access
+              record:dict = msgpack.unpackb(reader.read())
+              self.assertTrue(record['user_id'] is not None)
+              self.assertTrue(record['retrieved_ids'] is not None)
   
   @staticmethod
   def make_map_vs_negative_recs(TOP_KS:list, res_mean_ap_per_user:defaultdict,

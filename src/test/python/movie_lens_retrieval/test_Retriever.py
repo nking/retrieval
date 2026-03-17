@@ -46,7 +46,7 @@ class TestRetrieverAndRanker(unittest.TestCase):
       "occupation" : tf.io.FixedLenFeature([], tf.int64),
       "genres" : tf.io.FixedLenFeature([], tf.string)}
     self.max_k = 10
-      
+    
   def test_indexer_tensors(self):
    
     loaded_model = tf.saved_model.load(self.user_movie_models_dir)
@@ -430,12 +430,13 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
       max_k=1000, movies_batch_size=256)
     
     #for fast random access, set group_size to 1
+    opt = 'group_size:1'
     writer1 = array_record_module.ArrayRecordWriter(os.path.join(get_bin_dir(),
-        "user_recommendations_without_train_val.array_record"), 'group_size:1')
+        "user_recommendations_without_train_val.array_record"), opt)
     writer2 = array_record_module.ArrayRecordWriter(os.path.join(get_bin_dir(),
-        "user_recommendations_disliked_in_test.array_record"), 'group_size:1')
+        "user_recommendations_disliked_in_test.array_record"), opt)
     writer3 = array_record_module.ArrayRecordWriter(os.path.join(get_bin_dir(),
-        "user_recommendations_disliked_in_train.array_record"),'group_size:1')
+        "user_recommendations_disliked_in_train.array_record"), opt)
     
     users_test_df = pl.read_parquet(os.path.join(get_project_dir(),
       "src/test/resources/data/users/users.parquet"))
@@ -721,6 +722,30 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
               self.assertTrue(record['user_id'] is not None)
               self.assertTrue(record['retrieved_ids'] is not None)
   
+  def test_write_ratings_array_records(self):
+      
+      import glob
+      
+      files = [glob.glob(os.path.join(get_project_dir(),
+          "src/test/resources/data/sorted_1/ratings_sorted_1_joined*.parquet")),
+          glob.glob(os.path.join(get_project_dir(),
+              "src/test/resources/data/sorted_2/ratings_sorted_2_joined*.parquet"))]
+      
+      opt = 'group_size:1'
+      for i in range(len(files)):
+          infiles = files[i]
+          t = 'train' if i == 0 else 'test'
+          outfile = os.path.join(get_bin_dir(),
+              f'ratings_{t}.array_record')
+          writer = array_record_module.ArrayRecordWriter(outfile, opt)
+          for f in infiles:
+              df = pl.read_parquet(f)
+              rows = df.to_dicts()
+              for row in rows:
+                  serialized = msgpack.packb(row, use_bin_type=True)
+                  writer.write(serialized)
+          writer.close()
+  
   @staticmethod
   def make_map_vs_negative_recs(TOP_KS:list, res_mean_ap_per_user:defaultdict,
     res_rec_frac_of_neg_per_user:defaultdict, filename:str, show:bool=False):
@@ -756,6 +781,7 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
     if show:
       fig.show()
     del fig
+  
   
   def read_movies_file_into_genre_dict(self, filter_for_single:bool=True) -> Tuple[collections.defaultdict(list), int]:
     _ct = "GZIP" if self.movie_inputs.endswith(".gz") else None

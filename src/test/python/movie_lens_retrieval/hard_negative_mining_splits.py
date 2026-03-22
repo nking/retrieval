@@ -7,6 +7,9 @@ from movie_lens_retrieval.RetrieverAndRanker import RetrieverAndRanker
 import os
 
 """
+TODO:  correct to add to the exact hard negatives,
+a random selection from "all movies - recommended movies - seen in train - the positive example"
+
 formatting the data into lists for inputs for training a re-ranker with listwise ranking loss.
 
 Hard negative mining is followed to remove ratings "3" and

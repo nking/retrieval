@@ -405,9 +405,9 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
   def deserialize_fn(serialized_data):
       return msgpack.unpackb(serialized_data, raw=False)
   
-  def save_retrieval_to_arrayrecord(self, writer:array_record_module.ArrayRecordWriter, user_id:int, recommended_movies:List[int]):
-      for movies in recommended_movies:
-          record = msgpack.packb([user_id, movies], use_bin_type=True)
+  def save_retrieval_to_arrayrecord(self, writer:array_record_module.ArrayRecordWriter,
+          user_id:int, recommended_movies:List[int]):
+          record = msgpack.packb([user_id, recommended_movies], use_bin_type=True)
           writer.write(record)
       
   def test_eval_all(self):
@@ -726,7 +726,9 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
               try:
                   reader = array_record_module.ArrayRecordReader(filepath)
                   # read with random access
-                  record = msgpack.unpackb(reader.read())
+                  record = msgpack.unpackb(reader.read(), use_list=False)
+                  self.assertTrue(isinstance(record[0], int))
+                  self.assertTrue(isinstance(record[1], tuple))
                   self.assertEquals(2, len(record))
               finally:
                   if reader is not None:

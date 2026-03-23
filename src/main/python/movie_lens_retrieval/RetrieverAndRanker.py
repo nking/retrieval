@@ -439,7 +439,7 @@ class RetrieverAndRanker:
     id_ht, age_ht = self._create_user_static_hashtables(ds_ser, batch_size)
     
     return indexer, id_ht, age_ht
-
+  
   def get_users_given_users(self, user_data_dict:Union[
     Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]], top_k:int):
     if top_k < 1:

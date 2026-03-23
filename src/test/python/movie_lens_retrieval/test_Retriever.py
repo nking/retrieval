@@ -410,6 +410,124 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
           record = msgpack.packb([user_id, recommended_movies], use_bin_type=True)
           writer.write(record)
       
+  def test_write_user_embeddings(self):
+      loaded_user_movie_model = tf.saved_model.load(self.user_movie_models_dir)
+      batch_size = 256
+      users_path = self.user_inputs
+      output_uri = os.path.join(get_bin_dir(), "user_embeddings.array_record")
+      
+      _ct = "GZIP" if users_path.endswith(".gz") else None
+      file_paths = glob.glob(users_path)
+      ds_ser = tf.data.TFRecordDataset(file_paths, compression_type=_ct)
+      query_model = loaded_user_movie_model.signatures["serving_query"]
+      INPUT_KEY = \
+      list(query_model.structured_input_signature[1].keys())[0]
+      
+      feature_spec = {"user_id": tf.io.FixedLenFeature([], tf.int64),
+          "movie_id": tf.io.FixedLenFeature([], tf.int64),
+          "rating": tf.io.FixedLenFeature([], tf.int64),
+          "timestamp": tf.io.FixedLenFeature([], tf.int64),
+          "gender": tf.io.FixedLenFeature([], tf.string),
+          "age": tf.io.FixedLenFeature([], tf.int64),
+          "occupation": tf.io.FixedLenFeature([], tf.int64),
+          "genres": tf.io.FixedLenFeature([], tf.string)}
+      
+      def parse_tf_example(example_proto, feature_spec):
+          return tf.io.parse_single_example(example_proto,
+              feature_spec)
+      
+      embeddings = []
+      user_ids = []
+      for batch in ds_ser.batch(batch_size):
+          emb = query_model(**{INPUT_KEY: batch})[
+              'outputs']  # batch_size x emb_dim, e.g. 256 X 32
+          embeddings.extend(emb.numpy().tolist())
+      ds = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+      for batch in ds.batch(batch_size):
+          #NOTE: you can write all features out if needed for a different use:
+          user_ids.extend(batch["user_id"].numpy().tolist())
+      assert (len(embeddings) == len(user_ids))
+      
+      writer = None
+      try:
+          writer = array_record_module.ArrayRecordWriter(output_uri,
+              "group_size:1")
+          for user_id, emb in zip(user_ids, embeddings):
+              writer.write(
+                  msgpack.packb([user_id, emb], use_bin_type=True))
+      finally:
+          if writer is not None:
+              writer.close()
+      
+      reader = None
+      try:
+          reader = array_record_module.ArrayRecordReader(output_uri)
+          record = msgpack.unpackb(reader.read(), use_list=True)
+          self.assertEquals(2, len(record))
+          self.assertTrue(isinstance(record[0], int))
+          self.assertTrue(isinstance(record[1], list))
+          
+      finally:
+          if reader is not None:
+              reader.close()
+  
+  def test_write_movie_embeddings(self):
+      loaded_user_movie_model = tf.saved_model.load(self.user_movie_models_dir)
+      batch_size = 256
+      users_path = self.user_inputs
+      output_uri = os.path.join(get_bin_dir(),
+          "movie_embeddings.array_record")
+      
+      _ct = "GZIP" if users_path.endswith(".gz") else None
+      file_paths = glob.glob(users_path)
+      ds_ser = tf.data.TFRecordDataset(file_paths, compression_type=_ct)
+      query_model = loaded_user_movie_model.signatures["serving_candidate"]
+      INPUT_KEY = list(query_model.structured_input_signature[1].keys())[0]
+      
+      feature_spec = {
+          "movie_id": tf.io.FixedLenFeature(shape=[], dtype=tf.int64,
+              default_value=None),
+          "genres": tf.io.FixedLenFeature(shape=[], dtype=tf.string,
+              default_value=None)}
+      
+      def parse_tf_example(example_proto, feature_spec):
+          return tf.io.parse_single_example(example_proto,
+              feature_spec)
+      
+      embeddings = []
+      movie_ids = []
+      for batch in ds_ser.batch(batch_size):
+          emb = query_model(**{INPUT_KEY: batch})['outputs']  # batch_size x emb_dim, e.g. 256 X 32
+          embeddings.extend(emb.numpy().tolist())
+      ds = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
+      for batch in ds.batch(batch_size):
+          # NOTE: you can write all features out if needed for a different use:
+          movie_ids.extend(batch["movie_id"].numpy().tolist())
+      assert (len(embeddings) == len(movie_ids))
+      
+      writer = None
+      try:
+          writer = array_record_module.ArrayRecordWriter(output_uri,
+              "group_size:1")
+          for id, emb in zip(movie_ids, embeddings):
+              writer.write(
+                  msgpack.packb([id, emb], use_bin_type=True))
+      finally:
+          if writer is not None:
+              writer.close()
+      
+      reader = None
+      try:
+          reader = array_record_module.ArrayRecordReader(output_uri)
+          record = msgpack.unpackb(reader.read(), use_list=True)
+          self.assertEquals(2, len(record))
+          self.assertTrue(isinstance(record[0], int))
+          self.assertTrue(isinstance(record[1], list))
+      
+      finally:
+          if reader is not None:
+              reader.close()
+      
   def test_eval_all(self):
     """
     calculate and visualize for all test users the
@@ -794,6 +912,7 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
           continue
       genre_to_ids[x['genres']].append(x['movie_id'])
     return genre_to_ids, n_movies
+    
     
   if __name__ == '__main__':
     unittest.main()

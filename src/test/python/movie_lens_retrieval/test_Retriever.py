@@ -474,12 +474,11 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
   def test_write_movie_embeddings(self):
       loaded_user_movie_model = tf.saved_model.load(self.user_movie_models_dir)
       batch_size = 256
-      users_path = self.user_inputs
-      output_uri = os.path.join(get_bin_dir(),
-          "movie_embeddings.array_record")
+      movies_path = self.movie_inputs
+      output_uri = os.path.join(get_bin_dir(), "movie_embeddings.array_record")
       
-      _ct = "GZIP" if users_path.endswith(".gz") else None
-      file_paths = glob.glob(users_path)
+      _ct = "GZIP" if movies_path.endswith(".gz") else None
+      file_paths = glob.glob(movies_path)
       ds_ser = tf.data.TFRecordDataset(file_paths, compression_type=_ct)
       query_model = loaded_user_movie_model.signatures["serving_candidate"]
       INPUT_KEY = list(query_model.structured_input_signature[1].keys())[0]
@@ -523,6 +522,7 @@ top_k=200, stat=148.3051, global hypergeom.sf p_value=0.0000
           self.assertEquals(2, len(record))
           self.assertTrue(isinstance(record[0], int))
           self.assertTrue(isinstance(record[1], list))
+          self.assertNotEqual(record[0], record[1])
       
       finally:
           if reader is not None:

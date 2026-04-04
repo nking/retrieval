@@ -1,0 +1,6 @@
+outs:
+- md5: 635e1d67de9c39a47ee404636c226c71.dir
+  size: 4521984
+  nfiles: 1
+  hash: md5
+  path: ratings_val_liked

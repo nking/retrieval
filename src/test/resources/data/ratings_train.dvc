@@ -1,0 +1,6 @@
+outs:
+- md5: 3f31e8ace24512da7b21f889d328cf62.dir
+  size: 62128128
+  nfiles: 1
+  hash: md5
+  path: ratings_train

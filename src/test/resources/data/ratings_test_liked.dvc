@@ -1,0 +1,6 @@
+outs:
+- md5: c568b3811e4eaa4f18681921f328cd09.dir
+  size: 4325376
+  nfiles: 1
+  hash: md5
+  path: ratings_test_liked

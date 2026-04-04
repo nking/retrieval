@@ -1,0 +1,6 @@
+outs:
+- md5: aa93344e98cef715e86bde4c19760867.dir
+  size: 36044800
+  nfiles: 1
+  hash: md5
+  path: ratings_train_liked

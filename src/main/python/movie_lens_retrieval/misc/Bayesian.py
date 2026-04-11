@@ -242,7 +242,7 @@ class BayesianAvg:
       )
       self.df_sorted = df.sort('dirichlet_rating', descending=True)
   
-  def get_top(self, top:int=10):
+  def get_top(self, top:int=10) -> pl.DataFrame:
     return self.df_sorted.head(top)
   
   

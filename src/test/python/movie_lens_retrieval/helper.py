@@ -1,6 +1,7 @@
 import os
 from typing import List
 import tensorflow as tf
+import polars as pl
 
 def get_kaggle() -> bool:
   cwd = os.getcwd()
@@ -25,6 +26,31 @@ def get_project_dir() -> str:
 def get_bin_dir() -> str:
   return os.path.join(get_project_dir(), "bin")
 
+def load_movies_into_polars() -> pl.DataFrame:
+    ds = load_movies_into_tfdatadset()
+    df = pl.from_dicts(list(ds.as_numpy_iterator()))
+    df = df.with_columns([
+        pl.col("title").cast(pl.String),
+        pl.col("genres").cast(pl.String)
+    ])
+    return df
+
+def load_movies_into_tfdatadset() -> tf.data.Dataset:
+    feature_spec = {
+        "movie_id": tf.io.FixedLenFeature([], tf.int64),
+        "title": tf.io.FixedLenFeature([], tf.string),
+        "genres": tf.io.FixedLenFeature([], tf.string),
+    }
+    
+    def _parse_function(example_proto):
+        return tf.io.parse_single_example(example_proto, feature_spec)
+    file_paths = [os.path.join(get_project_dir(),
+        'src/test/resources/data/movies/movies-00000-of-00001.tfrecord')]
+    dataset = tf.data.TFRecordDataset(file_paths)
+    parsed_dataset = dataset.map(_parse_function)
+    
+    return parsed_dataset
+    
 def load_list_of_globs_into_tfrecords(list_of_globs:List[str], batch_size:int=256):
   
   def load_tfrecords(filepath):

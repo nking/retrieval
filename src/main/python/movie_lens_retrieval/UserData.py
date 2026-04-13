@@ -1,3 +1,5 @@
+from typing import Dict
+
 import tensorflow as tf
 import polars as pl
 
@@ -23,7 +25,7 @@ class UserData(object):
         tf.TensorSpec(shape=[None, 1], dtype=tf.int64),
         tf.TensorSpec(shape=[None, 1], dtype=tf.int64)
     ])
-    def get_user(self, user_id: tf.Tensor, timestamp: tf.Tensor):
+    def get_user(self, user_id: tf.Tensor, timestamp: tf.Tensor) -> Dict[str, tf.Tensor]:
         """
         get a dictionary of inputs usable for the Query model dictionary signature.
         
@@ -36,7 +38,7 @@ class UserData(object):
         #tf.debugging.assert_equal(tf.shape(user_id), tf.shape(timestamp),
         #    message="User ID and Timestamp batches must be the same size")
         
-        idx = user_id - 1
+        idx = user_id - tf.constant(1, dtype=tf.int64)
         now = tf.cast(tf.timestamp(), tf.int64)
         resolved_ts = tf.where(
             tf.equal(timestamp, -1),
@@ -51,4 +53,15 @@ class UserData(object):
             'occupation': tf.gather(self.occupation, idx),
             'timestamp': resolved_ts,
         }
+    
+    @tf.function
+    def users_exist(self, user_ids: tf.Tensor) -> tf.Tensor:
+        # This checks a million IDs as fast as it checks one.
+        lower_bound = tf.greater_equal(user_ids, 1)
+        upper_bound = tf.less_equal(user_ids, self.num_users)
+        return tf.logical_and(lower_bound, upper_bound)
+    
+    def user_exists(self, user_id: int) -> bool:
+        return 1 <= user_id <= self.num_users
+    
     

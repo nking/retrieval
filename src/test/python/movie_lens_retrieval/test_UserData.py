@@ -9,7 +9,7 @@ class TestUserData(unittest.TestCase):
         self.users_path = os.path.join(get_project_dir(),
             "src/test/resources/data/users/users.parquet")
     
-    def test_get_user(self):
+    def test_0(self):
         userData = UserData(self.users_path)
         '''
         7::M::35::1::06810
@@ -35,6 +35,12 @@ class TestUserData(unittest.TestCase):
                 self.assertTrue(tf.reduce_all(tf.equal(expected[key], d[key])))
             else:
                 self.assertTrue(tf.reduce_any(tf.not_equal(expected[key], d[key])))
+                
+        batch_exist = userData.users_exist(user_ids)
+        self.assertTrue(tf.reduce_all(batch_exist))
+        
+        for x in user_ids:
+            self.assertTrue(tf.equal(tf.constant(True), userData.user_exists(user_ids[0].numpy().item())))
         
     if __name__ == '__main__':
         unittest.main()

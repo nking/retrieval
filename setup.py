@@ -10,8 +10,8 @@ setup(
     'faiss-cpu; platform_system != "Linux"',
     'scann; platform_system == "Linux"',
     'tensorflow>=2.16.1', 'numpy >= 1.26.4',
-    'array-record=0.8.3', 'msgpack==1.1.2', 'msgpack-numpy==0.4.8'
-
+    'array-record=0.8.3', 'msgpack==1.1.2', 'msgpack-numpy==0.4.8',
+    'polars>=1.35.2'
   ],
   extras_require={"test": ["pytest"]},
   classifiers=[ 'Natural Language :: English',

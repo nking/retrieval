@@ -11,6 +11,19 @@ https://github.com/nking/recommender_systems/blob/main/src/test/python/movie_len
 
 user_movie_model:
 
+signatures (use saved_model_cli to see more):
+   - serving_candidate:
+     serialized example with "movie_id" and "genres"
+
+   - serving_query:
+     serialized example with "user_id", "age", "occupation", "gender", "timestamp"
+
+   - serving_candidate_dict
+     expecting named inputs movie_id, genres
+
+   - serving_query_dict:
+     expecting named inputs user_id, age, occupation, gender, timestamp
+
 The model is TwoTowerDNN, a bi-encoder trained with 
 an in-batch softmax objective (contrastive, listwise loss)
 and corrected for item sampling bias 

@@ -10,7 +10,7 @@ class TestUserData(unittest.TestCase):
         self.movies_path = os.path.join(get_project_dir(),
             "src/test/resources/data/movies/movies.parquet")
     
-    def test_get_user(self):
+    def test_get_movie(self):
         data = MovieData(self.movies_path)
         '''
         6047::Sabrina (1995)::Comedy|Romance

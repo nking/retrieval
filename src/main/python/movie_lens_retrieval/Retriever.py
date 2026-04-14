@@ -1,7 +1,6 @@
 from typing import Union, List, Dict, Tuple
 import tensorflow as tf
 # from google.protobuf import text_format
-import random
 import glob
 
 from enum import Enum
@@ -17,15 +16,9 @@ import scann
 
 """
 NOTE that data should only contain data up to and including training data and eval data. no test
-data should be included.  The train, val, and test splits formed in the recommender_systems project
-are first split into (train + val) and (test) by timestamp with test containing later timestamps,
-then (train) and (val) are split into disjoint users.  The final partitions are roughly 80:10:10 percentages
-in length.
+data should be included.
 
 For cloud based Retriever, can adapt for services for ScANN.
-
-Bloom filters or efficient database and cache system can be used outside of this component to:
-(1) check if user has already seen movies returned by this component.
 
 """
 
@@ -45,6 +38,18 @@ class Retriever:
         "age": tf.io.FixedLenFeature([], tf.int64),
         "occupation": tf.io.FixedLenFeature([], tf.int64),
         "genres": tf.io.FixedLenFeature([], tf.string)}
+    
+    feature_spec_movie = {
+        "movie_id": tf.io.FixedLenFeature([], tf.int64),
+        "genres": tf.io.FixedLenFeature([], tf.string)}
+    
+    feature_spec_user = {
+        "user_id": tf.io.FixedLenFeature([], tf.int64),
+        "gender": tf.io.FixedLenFeature([], tf.string),
+        "age": tf.io.FixedLenFeature([], tf.int64),
+        "occupation": tf.io.FixedLenFeature([], tf.int64),
+        "timestamp": tf.io.FixedLenFeature([], tf.int64),
+        }
     
     def __init__(self,
             user_movie_saved_model_dir: str,
@@ -117,7 +122,7 @@ class Retriever:
         if not is_not_empty:
             raise ValueError(f"the files is empty at {embed_file_path}")
         
-        key = "movie_id" if embedding_type == EmbeddingType.USER else "movie_id"
+        key = "user_id" if embedding_type == EmbeddingType.USER else "movie_id"
         # ids is a Tensor of ints
         # embeddings is a tensor of float arrays of length embed_dim
         ids, embeddings = Retriever._parse_emb_tfrecord_ser_into_lists(
@@ -164,34 +169,34 @@ class Retriever:
             #"embedding": tf.io.VarLenFeature(tf.float32)
         }
         
-        def parse_tf_example(example_proto, spec, id_key):
+        def parse_tf_example(example_proto, spec, key:str):
             d = tf.io.parse_single_example(example_proto, spec)
-            #print(f'd={d}', flush=True)
             # d={'embedding': <tf.Tensor 'ParseSingleExample/ParseExample/ParseExampleV2:0' shape=(16,) dtype=float32>,
             # 'movie_id': <tf.Tensor 'ParseSingleExample/ParseExample/ParseExampleV2:1' shape=() dtype=int64>}
             return {
-                "id": d[id_key],
+                "id": d[key],
                 "embedding": d["embedding"],
             }
         
         ds = ds_ser.map(lambda x: parse_tf_example(x, em_feature_spec, id_key), num_parallel_calls=tf.data.AUTOTUNE)
         ds = ds.prefetch(buffer_size=tf.data.AUTOTUNE)
         
-        element = next(iter(ds.take(1)), None)
-        if element is None:
-            raise ValueError(f"could not parse embedding file.  expecting features: {id_key} and embedding and that embedding dim={embed_dim}")
+        #def assert_not_empty(dataset):
+        #    is_not_empty = dataset.reduce(False, lambda x, _: True)
+        #    tf.debugging.assert_equal(is_not_empty, True, "ds contains 0 elements")
+        #assert_not_empty(ds.take(1))
         
         ids = []
         embeddings = []
         for batch in ds.batch(1024):
-            ids.extend(batch['id'])
-            embeddings.extend(batch['embedding'])
-        ids = tf.stack(ids, axis=0)
-        embeddings = tf.stack(embeddings, axis=0)
+            ids.append(batch['id'])  #Tensor shape (batch_size, 1)
+            embeddings.append(batch['embedding'])  #Tensor shape (batch_size, 16)
+        ids = tf.concat(ids, axis=0)
+        embeddings = tf.concat(embeddings, axis=0)
         return ids, embeddings
     
     @tf.function
-    def validate_tensor_and_int(self, t):
+    def _validate_tensor_and_int(self, t):
         # Dtype Check: Static (Traced once, zero runtime cost)
         if t.dtype != tf.int64:
             raise TypeError(f"Expected dtype tf.int64 but got {t.dtype}")
@@ -217,7 +222,7 @@ class Retriever:
     def _check_inputs_for_id(self, inputs_type:EmbeddingType,
         inputs: Union[
         tf.Tensor,
-        List[int],
+        List[List[int]],
         Dict[str, tf.Tensor],
         Dict[str, Union[int, str]],
         List[Dict[str, Union[int, str]]]]):
@@ -227,12 +232,12 @@ class Retriever:
         
         if isinstance(inputs, tf.Tensor): #or tf.is_tensor(inputs)
             #can be scalar with shape=() or array with shape=(None,1)
-            self.validate_tensor_and_int(inputs)
+            self._validate_tensor_and_int(inputs)
         elif isinstance(inputs, list):
             #list of integers or list of dictionaries
             if len(inputs) == 0:
                 raise ValueError(f"expected at least 1 input for {inputs_type}")
-            if not isinstance(inputs[0], int):
+            if not isinstance(inputs[0], list):
                 if not isinstance(inputs[0], dict):
                     raise TypeError(f"inputs list must contain integers or dictionaries, got {type(inputs[0])}")
                 #assert dictionaries have expected ids
@@ -253,10 +258,11 @@ class Retriever:
             raise TypeError(f"type {type(inputs)} not supported")
         pass
     
-    def _format_inputs_only_to_dict_tensors(self, inputs_type:EmbeddingType,
+    @staticmethod
+    def _format_inputs_only_to_dict_tensors(inputs_type:EmbeddingType,
         inputs: Union[
         tf.Tensor,
-        List[int],
+        List[List[int]],
         Dict[str, tf.Tensor],
         Dict[str, Union[int, str]],
         List[Dict[str, Union[int, str]]]]) -> Dict[str, tf.Tensor]:
@@ -277,16 +283,18 @@ class Retriever:
         
         if isinstance(inputs, list):
             #list of integers or list of dictionaries
-            if isinstance(inputs[0], int):
+            if isinstance(inputs[0], list):
                 key = 'user_id' if inputs_type == EmbeddingType.USER else 'movie_id'
                 return {key: tf.constant(inputs, dtype=tf.int64)}
             #else is list of dictionaries of scalars
-            outp_dict = {key: [] for key in Retriever.feature_spec.keys()}
+            inter = Retriever.feature_spec.keys() & inputs[0].keys()
+            outp_dict0 = {key: [] for key in inter}
             for d in inputs:
                 for k,v in d.items():
-                    outp_dict[k].append(v)
-            for k in outp_dict.keys():
-                outp_dict[k] = tf.constant(outp_dict[k], dtype=Retriever.feature_spec[k].dtype)
+                    outp_dict0[k].append([v])
+            outp_dict = {}
+            for k in outp_dict0.keys():
+                outp_dict[k] = tf.constant(outp_dict0[k], dtype=Retriever.feature_spec[k].dtype)
             return outp_dict
         
         #else is dictionary of scalars or dictionary of tensors
@@ -295,17 +303,20 @@ class Retriever:
             #is already formatted as tensors
             return inputs
         
-        outp_dict = {key: [] for key in Retriever.feature_spec.keys()}
+        #format input for the items that are within inputs.items()
+        inter = Retriever.feature_spec.keys() & inputs.keys()
+        outp_dict0 = {key: [] for key in inter}
         for k, v in inputs.items():
-            outp_dict[k].append(v)
-        for k in outp_dict.keys():
-            outp_dict[k] = tf.constant(outp_dict[k], dtype=Retriever.feature_spec[k].dtype)
+            outp_dict0[k].append([v])
+        outp_dict = {}
+        for k in outp_dict0.keys():
+            outp_dict[k] = tf.constant(outp_dict0[k], dtype=Retriever.feature_spec[k].dtype)
         return outp_dict
         
-    def _create_dictionary_of_tensors(self, inputs_type:EmbeddingType,
+    def create_dictionary_of_tensors(self, inputs_type:EmbeddingType,
         inputs: Union[
         tf.Tensor,
-        List[int],
+        List[List[int]],
         Dict[str, tf.Tensor],
         Dict[str, Union[int, str]],
         List[Dict[str, Union[int, str]]]]) -> Dict[str, tf.Tensor]:
@@ -330,14 +341,24 @@ class Retriever:
             self._check_inputs_for_id(inputs_type, inputs)
             
         #create dictionary of tensors from inputs first
-        inp_dict = self._format_inputs_only_to_dict_tensors(inputs_type, inputs)
+        inp_dict = Retriever._format_inputs_only_to_dict_tensors(inputs_type, inputs)
         
-        editing for refactored signatures
+        if inputs_type == EmbeddingType.MOVIE:
+            diff = Retriever.feature_spec_movie.keys() - inp_dict.keys()
+            if len(diff) > 0:
+                movie_data = self.movie_data.get_movie(inp_dict['movie_id'])
+                for k in diff:
+                    inp_dict[k] = movie_data[k]
+        else:
+            diff = Retriever.feature_spec_user.keys() - inp_dict.keys()
+            if len(diff) > 0:
+                if 'timestamp' not in inp_dict:
+                    inp_dict['timestamp'] = tf.constant([[-1] for _ in range(len(inp_dict['user_id']))], dtype=tf.int64)
+                user_data = self.user_data.get_user(inp_dict['user_id'], inp_dict['timestamp'])
+                for k in diff:
+                    inp_dict[k] = user_data[k]
         
-        #lookup mising information and supply timestamp if value is -1
-        
-        
-        return outp_dict
+        return inp_dict
    
     @staticmethod
     def build_scann_searcher(embeddings: tf.Tensor, top_k: int):
@@ -352,157 +373,90 @@ class Retriever:
         # https://github.com/google-research/google-research/blob/master/scann/docs/example.ipynb
         # https://github.com/google-research/google-research/blob/master/scann/docs/algorithms.md
         """
-        bind1 = scann.scann_ops_pybind.builder(db=embeddings,
+        builder = scann.scann_ops_pybind.builder(db=embeddings,
             num_neighbors=top_k, distance_measure="dot_product")
-        searcher = bind1.score_brute_force(quantize=False).build()
-        return searcher
+        
+        n_embeddings = tf.shape(embeddings)[0]
+        if n_embeddings < 20000:
+            return builder.score_brute_force(quantize=False).build()
+        
+        # Rule of thumb: num_leaves should be roughly sqrt(N)
+        # We cap it at 100,000 for extremely large datasets
+        n_leaves = int(n_embeddings**0.5)
+        
+        # We search ~5-10% of leaves to maintain high recall
+        n_leaves_to_search = max(20, n_leaves // 20)
+        
+        builder = builder.tree(
+            num_leaves=n_leaves,
+            num_leaves_to_search=n_leaves_to_search,
+            training_sample_size=min(n_embeddings, 250000)
+        )
+        
+        # Add Asymmetric Hashing (AH)
+        # This is worth doing for almost any dataset over 10k
+        builder = builder.score_ah(
+            dimensions_per_block=2,
+            anisotropic_quantization_threshold=0.2
+        )
+        
+        # Rescore (Reordering)
+        # We re-rank a small fraction of the top AH results with brute-force math
+        # for 100% precision on the final top_k.
+        builder = builder.reorder(reordering_num_neighbors=top_k * 10)
+        
+        return builder.build()
     
     def get_cold_start_movie_recommendations(self, top_k: int = 100):
         return self.cold_start_movie_list[:top_k].copy()
     
-    def _create_embeddings(self, embedding_type: EmbeddingType, inputs: Union[
-        Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]]) -> tf.Tensor:
-        """
-        given inputs, use the query model to make embeddings.
-        :param inputs: dictionary of inputs where keys must be all columns from the joined ratings file that the models
-        were trained upon, OR, the dictionary must contain only the movie_id.
-        :return: embeddings usable for the vector approx nearest neighbor searches.
-        output format is tensor of shape (len(inputs as a list
-        """
-        if not isinstance(inputs, list):
-            inputs = [inputs]
-        use_ser = False
-        key = "movie_id" if embedding_type == EmbeddingType.USER else "movie_id"
-        for inp_dict in inputs:
-            if not isinstance(inp_dict, dict) or "movie_id" not in inp_dict:
-                raise ValueError(
-                    "expecting inputs  to be a dictionary that includes movie_id "
-                    "or a list of dictionaries containing movie_id")
-            id1 = inp_dict[key]
-            if len(inp_dict) == 1:
-                use_ser = True
-                break
-            if Retriever.feature_spec.keys() != inp_dict.keys():
-                raise ValueError(
-                    f"expected inputs keys to be: {Retriever.feature_spec.keys()}")
-            break
-        if use_ser:
-            self._create_embeddings_given_ids(embedding_type, inputs)
-        return self._create_embeddings_given_dicts(embedding_type, inputs)
-    
-    def _create_embeddings_given_ids(self, embedding_type: EmbeddingType,
-            inputs: Union[Dict[str, int], List[Dict[str, int]], List[
-                int], tf.Tensor]) -> tf.Tensor:
-        """
-        given inputs, use the query_candidate model to make embeddings.
-        :param inputs: dictionary or list of dictionaries of inputs containing only the movie_id.
-        :return: embeddings usable for the vector approx nearest neighbor searches.
-        output format is tensor of shape (len(inputs as a list
-        """
-        editing for refactored signatures
-
-        key = "movie_id" if embedding_type == EmbeddingType.USER else "movie_id"
-        if isinstance(inputs, list):
-            if isinstance(inputs[0], int):
-                inputs = tf.constant(inputs, dtype=tf.int64)
-            elif isinstance(inputs[0], tf.Tensor):
-                inputs = tf.stack(inputs, axis=0)
-            elif isinstance(inputs[0], dict):
-                tmp = [d[key] for d in inputs]
-                inputs = tf.constant(tmp, dtype=tf.int64)
-        elif isinstance(inputs, dict):
-            tmp = [inputs[key]]
-            inputs = tf.constant(tmp, dtype=tf.int64)
-        if not isinstance(inputs, tf.Tensor):
-            raise ValueError(
-                f"expecting inputs to be a tensor at this stage.  type={inputs}")
-        if embedding_type == EmbeddingType.USER:
-            examples_ser_list = self.user_id_to_ser_ht.lookup(inputs)
-            infer = self.loaded_user_movie_model.signatures["serving_query"]
-        else:
-            examples_ser_list = self.movie_id_to_ser_ht.lookup(inputs)
-            infer = self.loaded_user_movie_model.signatures["serving_candidate"]
-            
-        INPUT_KEY = list(infer.structured_input_signature[1].keys())[0]
-        output_keyword = list(infer.structured_outputs.keys())[0]
-        #TODO: add try/except error handling
-        embeddings_list = infer(**{INPUT_KEY: examples_ser_list})[output_keyword]
-        
-        # embeddings_list is a single tensory with a 2D-array of embeddings
-        return embeddings_list
-    
-    def _create_embeddings_given_dicts(self, embedding_type: EmbeddingType,
-            inputs: Union[Dict[str, Union[int, str]], List[
-                Dict[str, Union[int, str]]]]) -> tf.Tensor:
-        """
-        given inputs, use the query_candidate model to make embeddings.
-        :param inputs: dictionary or list of dictionary of inputs where keys must be all columns from the joined ratings file that the models
-        were trained upon.
-        :return: embeddings usable for the vector approx nearest neighbor searches.
-        output format is tensor of shape (len(inputs as a list
-        """
-        editing for refactored signatures
-
-        n = len(Retriever.feature_spec)
-        if not isinstance(inputs, list):
-            inputs = [inputs]
-        #batch format is a dictionary of the feature keys where each dictionary value is a Tensor of the list of values for the key
-        if (len(inputs) == 1 and inputs[0].keys() == Retriever.feature_spec.keys()
-                and sum([int(isinstance(inputs[0][key], tf.Tensor)) for key in Retriever.feature_spec.keys()]) == n):
-            batch = inputs[0]
-        else:
-            batch = {key: [] for key in Retriever.feature_spec.keys()}
-            for inp_dict in inputs:
-                if not isinstance(inp_dict, dict) or "movie_id" not in inp_dict:
-                    raise ValueError(
-                        "expecting inputs  to be a dictionary that includes movie_id "
-                        "or a list of dictionaries containing movie_id")
-                if Retriever.feature_spec.keys() != inp_dict.keys():
-                    raise ValueError(
-                        f"expected inputs keys to be: {Retriever.feature_spec.keys()}")
-                # fake_dict = Retriever._create_serialized_tfexample(inp_dict))
-                for key in Retriever.feature_spec.keys():
-                    batch[key].append(inp_dict[key])
-        if embedding_type == EmbeddingType.USER:
+    def _create_embeddings(self, inp_data_type:EmbeddingType, inp_data:Dict[str, tf.Tensor]) -> tf.Tensor:
+        if inp_data_type == EmbeddingType.USER:
             infer_for_dict = self.loaded_user_movie_model.signatures[
                 "serving_query_dict"]
+            embeddings_list = infer_for_dict(
+                age=inp_data['age'],
+                gender=inp_data['gender'],
+                occupation=inp_data['occupation'],
+                timestamp=inp_data['timestamp'],
+                user_id=inp_data['user_id'])
         else:
             infer_for_dict = self.loaded_user_movie_model.signatures[
                 "serving_candidate_dict"]
-        embeddings_list = infer_for_dict(
-            age=batch['age'],
-            gender=batch['gender'],
-            genres=batch['genres'],
-            movie_id=batch['movie_id'],
-            occupation=batch['occupation'],
-            timestamp=batch['timestamp'],
-            user_id=batch['movie_id'])
+            embeddings_list = infer_for_dict(
+                genres=inp_data['genres'],
+                movie_id=inp_data['movie_id'])
         # k X embed_dim
-        # embeddings_list is a single tensory with a 2D-array of embeddings
+        # embeddings_list is a single tensor with a 2D-array of embeddings
         output_keyword = list(infer_for_dict.structured_outputs.keys())[0]
         return embeddings_list[output_keyword]
     
-    def get_users_given_users(self, user_data: Union[
-        Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]], List[
-            int]], top_k: int):
+    def get_users_given_users(self, inputs: Dict[str, tf.Tensor], top_k: int):
         """
         given user query data, get nearest users
-        :param user_data: dictionary or list of dictionaries of inputs where keys must be all columns from the joined ratings file that the models
-        were trained upon, OR, the dictionary must contain only the movie_id or user_data can be  a list of user_ids.
+        :param inputs: dictionary of tensors
         :param top_k:
         :return: list of lists of top_k user_ids similar to those in user_data.
         """
         return self._get_ann_ids(inp_data_type=EmbeddingType.USER,
-            lookup_type=EmbeddingType.USER, inp_data=user_data, top_k=top_k)
+            lookup_type=EmbeddingType.USER, inp_data=inputs, top_k=top_k)
     
     def _get_ann_ids(self, inp_data_type: EmbeddingType,
-            lookup_type: EmbeddingType, inp_data: Union[
-                Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]],
-                List[int]], top_k: int):
+            lookup_type: EmbeddingType, inp_data: Dict[str, tf.Tensor], top_k: int):
         """
         get the nearest neighbor embeddings of lookup_type to the embedding to be made for inp_data of inp_data_type
-        :param inp_data: dictionary or list of dictionaries of inputs where keys must be all columns from the joined ratings file that the models
-        were trained upon, OR, the dictionary must contain only the id or inp_data can be  a list of ids.
+        :param inp_data: dictionary of tensors where keys are for the inp_data_type model.
+           example for EmbeddingType.USER:
+               'user_id': tf.constant([[1], [2], [3]], dtype=tf.int64),
+                'gender': tf.constant([["F"], ["M"], ["M"]], dtype=tf.string),
+                'age': tf.constant([[1], [56], [25]], dtype=tf.int64),
+                'occupation': tf.constant([[10], [16], [15]], dtype=tf.int64),
+                'timestamp': tf.constant([[ts], [ts], [ts]], dtype=tf.int64),
+            }
+            example of EmbeddingType.MOVIE:
+               {'movie_id': tf.constant([[6041], [6042], [6043]], dtype=tf.int64),
+                'genres': tf.constant([["Animation|Children's|Comedy"], ["Adventure|Children's|Fantasy"], ["Comedy|Romance"]], dtype=tf.string),
+            }
         :param top_k:
         :return: list of lists of top_k user or movie ids depending upon lookup_type, similar to those in inp_data.
         """
@@ -510,35 +464,22 @@ class Retriever:
             raise ValueError('top_k must be >= 1')
         if top_k > self.max_k:
             top_k = self.max_k
+            
         embeddings_tensor = self._create_embeddings(inp_data_type, inp_data)
         if lookup_type == EmbeddingType.USER:
-            neighbor_idxs, distances = self.user_indexers.search_batched(
-                embeddings_tensor, top_k)
-            nearest_ids = [[int(idx) for idx in self.id_to_user_id_ht.lookup(
-                tf.constant(_list, dtype=tf.int64)).numpy()] for _list in
-                neighbor_idxs]
+            neighbor_idxs, distances = self.user_indexers.search_batched(embeddings_tensor, top_k)
+            #neighbor_idxs are user_id - 1 so add 1
+            #neighbor idxs are 2D numpy arrays
+            nearest_ids = [[idx + 1 for idx in near] for near in neighbor_idxs]
         else:
-            neighbor_idxs, distances = self.movie_indexers.search_batched(
-                embeddings_tensor, top_k)
-            nearest_ids = [[int(idx) for idx in self.id_to_movie_id_ht.lookup(
-                tf.constant(_list, dtype=tf.int64)).numpy()] for _list in
-                neighbor_idxs]
+            neighbor_idxs, distances = self.movie_indexers.search_batched(embeddings_tensor, top_k)
+            # neighbor_idxs are 0 to n_movies-1 so add 1 then add movie_id_offset
+            # neighbor idxs are 2D numpy arrays
+            nearest_ids = [[idx + 1 + self.movie_id_offset for idx in near] for near in neighbor_idxs]
         
-        if not isinstance(inp_data, list):
-            inp_data = [inp_data]
-        for inp, ids in zip(inp_data, nearest_ids):
-            id0 = inp
-            if isinstance(id0, dict):
-                id0 = inp['movie_id'] if inp_data_type == EmbeddingType.USER else inp['movie_id']
-            if isinstance(id0, tf.Tensor):
-                id0 = id0.numpy().item()
-            if id0 in nearest_ids:
-                nearest_ids.remove(id0)
         return nearest_ids
     
-    def get_movies_given_movies(self, movie_data: Union[
-        Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]], List[
-            int]], top_k: int):
+    def get_movies_given_movies(self, movie_data: Dict[str, tf.Tensor], top_k: int):
         """
         get nearest movies to given movie data
         :param movie_data: dictionary or list of dictionaries of inputs where keys must be all columns from the joined ratings file that the models
@@ -549,9 +490,7 @@ class Retriever:
         return self._get_ann_ids(inp_data_type=EmbeddingType.MOVIE,
             lookup_type=EmbeddingType.MOVIE, inp_data=movie_data, top_k=top_k)
     
-    def get_users_given_movies(self, movie_data: Union[
-        Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]], List[
-            int]], top_k: int):
+    def get_users_given_movies(self, movie_data: Dict[str, tf.Tensor], top_k: int):
         """
         get nearest users to given movie data
         :param movie_data: dictionary or list of dictionaries of inputs where keys must be all columns from the joined ratings file that the models
@@ -562,9 +501,7 @@ class Retriever:
         return self._get_ann_ids(inp_data_type=EmbeddingType.MOVIE,
             lookup_type=EmbeddingType.USER, inp_data=movie_data, top_k=top_k)
     
-    def get_movies_given_users(self, user_data: Union[
-        Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]], List[
-            int]], top_k: int):
+    def get_movies_given_users(self, user_data: Dict[str, tf.Tensor], top_k: int):
         """
         get nearest movies to given user data
         :param user_data: dictionary or list of dictionaries of inputs where keys must be all columns from the joined ratings file that the models
@@ -581,45 +518,21 @@ class Retriever:
     def users_are_known(self, user_ids:tf.Tensor) -> tf.Tensor:
         return self.user_data.users_exist(user_ids)
     
-    def get_cos_sim_score(self, user_movie_data_dict: Union[
-        Dict[str, Union[int, str]], List[Dict[str, Union[int, str]]]],
-            as_tensor: bool = False):
-        """
-        given users and movies, return the cosine similarity score from the bi-encoder.
-        :param as_tensor:
-        :param user_movie_data_dict: a dictionary or list of dictionaries containing "movie_id", "age",
-        "movie_id" and "genres".  the movie_id and genres can be lists instead of scalars, and
-        if one is a list, the other must be also.
-        
-        example input:{"movie_id":1, "age":25, "movie_id":1, "genres":"Animation|Children's|Comedy"...}
-        
-        example input:{"movie_id":1, "age":25,
-          "movie_id":[1, 3952],
-          "genres":["Animation|Children's|Comedy", "Drama|Thriller"]...}
-    
-        :return: list of cosine similarity scores for the paired user and movie data
-        """
-        if not isinstance(user_movie_data_dict, list):
-            user_movie_data_dict = [user_movie_data_dict]
-        
-        batch = Retriever._create_dictionary_of_tensors(user_movie_data_dict)
+    def get_cos_sim_score(self, user_movie_data_dict: Dict[str, tf.Tensor]):
         
         infer_default_for_dict = self.loaded_user_movie_model.signatures[
             "serving_default_dict"]
         
         predictions = infer_default_for_dict(
-            age=batch['age'],
-            gender=batch['gender'],
-            genres=batch['genres'],
-            movie_id=batch['movie_id'],
-            occupation=batch['occupation'],
-            timestamp=batch['timestamp'],
-            user_id=batch['movie_id'])
+            age=user_movie_data_dict['age'],
+            gender=user_movie_data_dict['gender'],
+            genres=user_movie_data_dict['genres'],
+            movie_id=user_movie_data_dict['movie_id'],
+            occupation=user_movie_data_dict['occupation'],
+            timestamp=user_movie_data_dict['timestamp'],
+            user_id=user_movie_data_dict['user_id'])
         tensor_pred = predictions['outputs']
         tensor_pred = tf.reshape(tensor_pred, -1)
-        
-        if as_tensor:
-            return tensor_pred
         
         return tensor_pred.numpy().tolist()
     

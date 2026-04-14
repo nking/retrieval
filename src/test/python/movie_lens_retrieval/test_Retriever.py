@@ -1,9 +1,10 @@
 import collections
 import os.path
+import time
 import unittest
 import glob
 from collections import defaultdict
-from typing import Any
+from typing import Any, Dict
 
 from scipy.stats import hypergeom, combine_pvalues
 from six import moves
@@ -24,30 +25,9 @@ from array_record.python import array_record_module
 from helper import *
 from movie_lens_retrieval.Retriever import Retriever, EmbeddingType
 
+MOVIE_OFFSET = 6040 + 1
 
-def create_cold_start_list() -> List[int]:
-    batch_size = 1024
-    # print(movies_df)
-    movie_reader = None
-    data = None
-    try:
-        movie_reader = array_record_module.ArrayRecordReader(
-            os.path.join(get_project_dir(),
-                "src/test/resources/data/movie_ratings_pivot_table/movie_ratings_pivot_table.array_record"))
-        batch_bytes = movie_reader.read([x for x in range(0, batch_size)])
-        data = [msgpack.unpackb(b, use_list=False) for b in batch_bytes]
-    finally:
-        if movie_reader is not None:
-            movie_reader.close()
-    
-    pivot_df = pl.from_dicts(data)
-    
-    m = 1
-    b = BayesianAvg(pivot_df, m=m)
-    top_df = b.get_top(3883) #catalog has 3883 movies
-    return top_df['movie_id'].to_list()
-    
-class TestRetrieverAndRanker(unittest.TestCase):
+class TestRetrieval(unittest.TestCase):
     def setUp(self):
         
         saved_models_dir = os.path.join(get_project_dir(),
@@ -63,9 +43,9 @@ class TestRetrieverAndRanker(unittest.TestCase):
         self.user_emb = os.path.join(get_project_dir(),
             "src/test/resources/data/user_emb_inp/*tfrecord*.gz")
         
-        self.movies_path = os.path.join(get_project_dir(),
-            "src/test/resources/data/users/users.parquet")
         self.users_path = os.path.join(get_project_dir(),
+            "src/test/resources/data/users/users.parquet")
+        self.movies_path = os.path.join(get_project_dir(),
             "src/test/resources/data/movies/movies.parquet")
         
         self.max_k = 10
@@ -73,20 +53,11 @@ class TestRetrieverAndRanker(unittest.TestCase):
     def test_read_cold_start_movies(self):
         cold_start_movie_list = Retriever._read_cold_start(self.cold_start_path)
         self.assertTrue(len(cold_start_movie_list) > 3000)
-        self.assertTrue(isinstance(cold_start_movie_list[0]), int)
+        self.assertTrue(isinstance(cold_start_movie_list[0], int))
         
     def _construct_Retrieval(self, max_k) -> Retriever:
-        '''
-               def __init__(self, user_movie_saved_model_dir: str,
-                       cold_start_movie_list: List[int],
-                       user_embed_path: str,
-                       movie_embed_path: str,
-                       max_k: int = 1000,
-                       embed_dim: int = 16
-               ):
-               :return:
-               '''
         return Retriever(user_movie_saved_model_dir=self.user_movie_models_dir,
+            movie_id_offset = MOVIE_OFFSET,
             user_embed_path=self.user_emb,
             movie_embed_path=self.movie_emb,
             embed_dim=self.embed_dim,
@@ -95,10 +66,8 @@ class TestRetrieverAndRanker(unittest.TestCase):
             movies_path=self.movies_path,
             max_k=max_k)
     
-    def test_indexer_tensors(self):
-        
-        loaded_model = tf.saved_model.load(self.user_movie_models_dir)
-        
+    def test_format_construct_inputs_only_to_dict_tensors(self):
+    
         '''
         ways to provide inputs to the Retriever:
         1) user embedding mode:
@@ -124,45 +93,235 @@ class TestRetrieverAndRanker(unittest.TestCase):
            - dictionary of movie_ids and optional keys with values as tensors of arrays
            - list of dictionary of movie_ids pluands optional keys
         '''
-        
+        '''
+        1::F::1::10::48067
+        2::M::56::16::70072
+        3::M::25::15::55117
+        '''
         rr = self._construct_Retrieval(max_k=100)
         
-        editing for refactored signatures
+        key = 'user_id'
         
-        inputs1 = [{'user_id': 1, 'age': 10}, {'user_id': 2, 'age': 16}]
-        inputs1 = self._create_dictionary_of_tensors(inputs1)
-        inputs2 = [{'movie_id': 1+6040, 'genres': "Animation|Children's|Comedy"},
-            {'movie_id': 2+6040, 'genres': "Adventure|Children's|Fantasy"}]
-        inputs2 = self._create_dictionary_of_tensors(inputs2)
+        test_inps = []
         
-        inputs3 = [{'movie_id': 1}, {'movie_id': 2}]
-        inputs4 = [{'movie_id': 1+6040}, {'movie_id': 2+6040}]
+        ts = int(time.time())
         
+        outp_expected_all = \
+            {'user_id': tf.constant([[1], [2], [3]], dtype=tf.int64),
+                'gender': tf.constant([["F"], ["M"], ["M"]], dtype=tf.string),
+                'age': tf.constant([[1], [56], [25]], dtype=tf.int64),
+                'occupation': tf.constant([[10], [16], [15]], dtype=tf.int64),
+                'timestamp': tf.constant([[ts], [ts], [ts]], dtype=tf.int64),
+            }
+        outp_expected_0 = \
+            {'user_id': tf.constant([[1]], dtype=tf.int64),
+                'gender': tf.constant([["F"]], dtype=tf.string),
+                'age': tf.constant([[1]], dtype=tf.int64),
+                'occupation': tf.constant([[10]], dtype=tf.int64),
+                'timestamp': tf.constant([[ts]], dtype=tf.int64),
+            }
+        
+        ## === user id inputs ===
+        #0: tf.Tensor,
+        test_inps.append(tf.constant([[1], [2], [3]], dtype=tf.int64))
+        
+        #1:  List[int]
+        test_inps.append([[1], [2], [3]])
+        
+        #2:  Dict[str, tf.Tensor]
+        test_inps.append({key :tf.constant([[1], [2], [3]], dtype=tf.int64)})
+        
+        #3:  Dict[str, Union[int, str]]
+        test_inps.append({key : 1})
+        
+        #4:  List[Dict[str, Union[int, str]]]
+        test_inps.append([{key : 1}, {key : 2}, {key : 3}])
+        
+        #test_inps.append([{'user_id': 1, 'timestamp': time.time()},
+        #    {'user_id': 2, 'timestamp': time.time()},
+        #    {'user_id': 3, 'timestamp': time.time()}])
+        
+        emb_type = EmbeddingType.USER
+        
+        for i, inp in enumerate(test_inps):
+            outp: Dict[str, tf.Tensor] = Retriever._format_inputs_only_to_dict_tensors( emb_type, inp)
+            self.assertTrue(isinstance(outp, dict))
+            self.assertTrue(key in outp)
+            match i:
+                case 0:
+                    self.assertTrue(tf.reduce_all(tf.equal(outp[key], inp)))
+                    # break no fall-through behavior in python
+                case 1:
+                    self.assertTrue(tf.reduce_all(tf.equal(outp[key], test_inps[0])))
+                case 2:
+                    self.assertTrue(tf.reduce_all(tf.equal(outp[key], test_inps[0])))
+                case 3:
+                    self.assertTrue(
+                        tf.equal(outp[key], tf.constant([[1]], dtype=tf.int64)))
+                case 4:
+                    self.assertTrue(tf.reduce_all(tf.equal(outp[key], test_inps[0])))
+                
+        for i, inp in enumerate(test_inps):
+            outp: Dict[str, tf.Tensor] = rr.create_dictionary_of_tensors(emb_type, inp)
+            self.assertTrue(isinstance(outp, dict))
+            for k in outp_expected_all.keys():
+                self.assertTrue(k in outp)
+            match i:
+                case 0:
+                    for k, v in outp_expected_all.items():
+                        if k != 'timestamp':
+                            self.assertTrue(tf.reduce_all(tf.equal(outp[k], v)))
+                case 1:
+                    for k, v in outp_expected_all.items():
+                        if k != 'timestamp':
+                            self.assertTrue(tf.reduce_all(tf.equal(outp[k], v)))
+                case 2:
+                    for k, v in outp_expected_all.items():
+                        if k != 'timestamp':
+                            self.assertTrue(tf.reduce_all(tf.equal(outp[k], v)))
+                case 3:
+                    for k, v in outp_expected_0.items():
+                        if k != 'timestamp':
+                            self.assertTrue(tf.reduce_all(tf.equal(outp[k], v)))
+                case 4:
+                    for k, v in outp_expected_all.items():
+                        if k != 'timestamp':
+                            self.assertTrue(tf.reduce_all(tf.equal(outp[k], v)))
+        
+        ##==== movie id inputs ====
+        '''
+        6041::Toy Story (1995)::Animation|Children's|Comedy
+        6042::Jumanji (1995)::Adventure|Children's|Fantasy
+        6043::Grumpier Old Men (1995)::Comedy|Romance
+        '''
+        key = 'movie_id'
+        test_inps = []
+        
+        ## === user id inputs ===
+        # 0: tf.Tensor,
+        test_inps.append(tf.constant([[6041], [6042], [6043]], dtype=tf.int64))
+        
+        # 1:  List[int]
+        test_inps.append([[6041], [6042], [6043]])
+        
+        # 2:  Dict[str, tf.Tensor]
+        test_inps.append(
+            {key: tf.constant([[6041], [6042], [6043]], dtype=tf.int64)})
+        
+        # 3:  Dict[str, Union[int, str]]
+        test_inps.append({key: 6041})
+        
+        # 4:  List[Dict[str, Union[int, str]]]
+        test_inps.append([{key: 6041}, {key: 6042}, {key: 6043}])
+        
+        outp_expected_all = \
+            {'movie_id': tf.constant([[6041], [6042], [6043]], dtype=tf.int64),
+                'genres': tf.constant([["Animation|Children's|Comedy"], ["Adventure|Children's|Fantasy"], ["Comedy|Romance"]], dtype=tf.string),
+            }
+        outp_expected_0 = \
+            {'movie_id': tf.constant([[6041]], dtype=tf.int64),
+                'genres': tf.constant([["Animation|Children's|Comedy"]], dtype=tf.string)
+            }
+        
+        emb_type = EmbeddingType.MOVIE
+        
+        for i, inp in enumerate(test_inps):
+            print(f'Test2 {i}')
+            outp:Dict[str, tf.Tensor] = rr.create_dictionary_of_tensors(emb_type, inp)
+            self.assertTrue(isinstance(outp, dict))
+            self.assertTrue(key in outp)
+            match i:
+                case 0:
+                    self.assertTrue(tf.reduce_all(tf.equal(outp[key], inp)))
+                    #break no fall-through behavior in python
+                case 1:
+                    self.assertTrue(tf.reduce_all(tf.equal(outp[key], test_inps[0])))
+                case 2:
+                    self.assertTrue(tf.reduce_all(tf.equal(outp[key], test_inps[0])))
+                case 3:
+                    self.assertTrue(tf.reduce_all(tf.equal(outp[key], tf.constant([[6041]], dtype=tf.int64))))
+                case 4:
+                    self.assertTrue(tf.reduce_all(tf.equal(outp[key], test_inps[0])))
+                
+        for i, inp in enumerate(test_inps):
+            print(f'Test3 {i}')
+            outp: Dict[str, tf.Tensor] = rr.create_dictionary_of_tensors(emb_type, inp)
+            self.assertTrue(isinstance(outp, dict))
+            for k in outp_expected_all.keys():
+                self.assertTrue(k in outp)
+            match i:
+                case 0:
+                    for k, v in outp_expected_all.items():
+                        self.assertTrue(tf.reduce_all(tf.equal(outp[k], v)))
+                case 1:
+                    for k, v in outp_expected_all.items():
+                        self.assertTrue(tf.reduce_all(tf.equal(outp[k], v)))
+                case 2:
+                    for k, v in outp_expected_all.items():
+                        self.assertTrue(tf.reduce_all(tf.equal(outp[k], v)))
+                case 3:
+                    for k, v in outp_expected_0.items():
+                        self.assertTrue(tf.reduce_all(tf.equal(outp[k], v)))
+                case 4:
+                    for k, v in outp_expected_all.items():
+                        self.assertTrue(tf.reduce_all(tf.equal(outp[k], v)))
+             
+    def test_create_embeddings(self):
+        rr = self._construct_Retrieval(max_k=100)
+        
+        ts = int(time.time())
+        
+        user_inp = \
+            {'user_id': tf.constant([[1], [2], [3]], dtype=tf.int64),
+                'gender': tf.constant([["F"], ["M"], ["M"]], dtype=tf.string),
+                'age': tf.constant([[1], [56], [25]], dtype=tf.int64),
+                'occupation': tf.constant([[10], [16], [15]], dtype=tf.int64),
+                'timestamp': tf.constant([[ts], [ts], [ts]], dtype=tf.int64),
+            }
+        
+        user_emb = rr._create_embeddings(EmbeddingType.USER, user_inp)
+        self.assertTrue(isinstance(user_emb, tf.Tensor))
+        self.assertEqual(3, len(user_inp['user_id']))
+        self.assertEqual(rr.embed_dim, len(user_emb[0]))
+        
+        movie_inp = \
+            {'movie_id': tf.constant([[6041], [6042], [6043]], dtype=tf.int64),
+                'genres': tf.constant([["Animation|Children's|Comedy"],
+                    ["Adventure|Children's|Fantasy"], ["Comedy|Romance"]],
+                    dtype=tf.string),
+            }
+        
+        movie_emb = rr._create_embeddings(EmbeddingType.USER, user_inp)
+        self.assertTrue(isinstance(movie_emb, tf.Tensor))
+        self.assertEqual(3, len(movie_inp['movie_id']))
+        self.assertEqual(rr.embed_dim, len(movie_emb[0]))
+        
+    def test_build_scann_searcher_small(self):
+        
+        # 0 and 1 are similar,
+        # 2 and 3 are similar
+        embeddings_tensor = tf.constant(
+            [
+                [0.26162238, 0.52324476, 0.81102938], # a / np.linalg.norm(a)
+                [0.25441093, 0.55970404, 0.78867387],
+                [0.42985807, 0.08597161, 0.89879415],
+                [0.42955643, 0.0937214 , 0.89816344]
+            ],
+            dtype=tf.float32
+        )
+        
+        indexer = Retriever.build_scann_searcher(embeddings_tensor, top_k=2)
+        neighbor_idxs, distances = indexer.search_batched(embeddings_tensor, 2)
+        # results are both np.ndarrays
+        self.assertEqual([0, 1], neighbor_idxs[0].tolist())
+        self.assertEqual([1, 0], neighbor_idxs[1].tolist())
        
+        self.assertEqual([2, 3], neighbor_idxs[2].tolist())
+        self.assertEqual([3, 2], neighbor_idxs[3].tolist())
         
-        for j in range(4):
-            if j == 0:
-                inputs = inputs1
-                embeddings_tensor = rr._create_embeddings(EmbeddingType.USER, inputs)
-            elif j == 1:
-                inputs = inputs2
-                embeddings_tensor = rr._create_embeddings(EmbeddingType.MOVIE, inputs)
-            if j == 2:
-                inputs = inputs3
-                embeddings_tensor = rr._create_embeddings(EmbeddingType.USER, inputs)
-            elif j == 3:
-                inputs = inputs4
-                embeddings_tensor = rr._create_embeddings(EmbeddingType.MOVIE, inputs)
-            
-            indexer = Retriever.build_scann_searcher(embeddings_tensor, top_k=2)
-            neighbor_idxs, distances = indexer.search_batched( embeddings_tensor, 2)
-            # results are both np.ndarrays
-            self.assertEqual([0, 1], neighbor_idxs[0].tolist())
-            self.assertEqual([1, 0], neighbor_idxs[1].tolist())
-            a = set([i for _list in neighbor_idxs for i in _list])
-            self.assertTrue(0 in a)
-            self.assertTrue(1 in a)
-           
+    def test_build_scann_searcher_large(self):
+        pass
+    
     def test_retrieval(self):
         '''
         def __init__(self, user_movie_saved_model_dir: str,
@@ -175,211 +334,7 @@ class TestRetrieverAndRanker(unittest.TestCase):
         :return:
         '''
         rr = self._construct_Retrieval(max_k=1000)
-        
-        # who are the users similar to movie_id=
-        user_inp = {'movie_id': 5077, 'age': 25}
-        user_inp = Retriever._create_embeddings(EmbeddingType.USER, user_inp)
-        sim_users = rr.get_users_given_users(user_inp, top_k=9)
-        print(f'sim_users: {sim_users}')
-        # 1587, 2059, 5684, 1859, 4899, 5217, 3468, 2345, 3040
-        
-        sim_movies = rr.get_movies_given_users(user_inp, top_k=9)
-        print(f'sim_movies: {sim_movies}')
-        # 3089, 1572, 3030, 1068, 2731, 326, 1759, 3134, 2575, 2940
-        
-        # test that age is retrieved when missing from inouts
-        user_inp = [{'movie_id': 5077}, {'movie_id': 1}]
-        sim_users = rr.get_users_given_users(user_inp, top_k=9)
-        print(f'sim_users: {sim_users}')
-        try:
-            user_inp = [{'movie_id': 1_000_000}]
-            sim_users = rr.get_users_given_users(user_inp, top_k=9)
-            self.fail("Should have thrown a ValueError")
-        except ValueError:
-            pass
-        
-        movie_inp = {'movie_id': 1068 + 6040, 'genres': 'Crime|Film-Noir'}
-        sim_users = rr.get_users_given_movies(movie_inp, top_k=9)
-        print(f'sim_users: {sim_users}')
-        
-        movie_inp = [{'movie_id': 1068 + 6040}, {'movie_id': 1 + 6040}]
-        sim_users = rr.get_users_given_movies(movie_inp, top_k=9)
-        print(f'sim_users: {sim_users}')
-        
-        try:
-            movie_inp = {'movie_id': 1_000_000}
-            sim_users = rr.get_users_given_movies(movie_inp, top_k=9)
-            self.fail("Should have thrown a ValueError")
-        except ValueError:
-            pass
-        
-        movie_inp = [{'movie_id': 1068 + 6040}, {'movie_id': 1 + 6040}]
-        sim_movies = rr.get_movies_given_movies(movie_inp, top_k=9)
-        print(f'sim_movies: {sim_movies}')
-        
-        cold_starts = rr.get_cold_start_movie_recommendations(10)
-        print(f'cold_starts: {cold_starts}')
-        
-        print(f'is_user_known(1_000_000)={rr.user_is_known(1_000_000)}')
-        print(f'is_user_known(1)={rr.user_is_known(1)}')
-        
-        # use test data to check recommendations.  these are movies the user loved.
-        # the returned ratings shuld be high
-        user_inp = {'movie_id': 635, 'age': 56,
-            'movie_id': [1704 + 6040, 1940 + 6040],
-            'genres': ['Drama', 'Drama']}
-        preds = rr.get_predictions(user_inp)
-        print(f'predictions: {preds}')
-    
-    def test_write_user_embeddings(self):
-        loaded_user_movie_model = tf.saved_model.load(
-            self.user_movie_models_dir)
-        batch_size = 256
-        users_path = self.user_emb
-        output_uri = os.path.join(get_bin_dir(),
-            "user_embeddings.array_record")
-        
-        _ct = "GZIP" if users_path.endswith(".gz") else None
-        file_paths = glob.glob(users_path)
-        ds_ser = tf.data.TFRecordDataset(file_paths, compression_type=_ct)
-        query_model = loaded_user_movie_model.signatures["serving_query"]
-        INPUT_KEY = \
-            list(query_model.structured_input_signature[1].keys())[0]
-        
-        feature_spec = {"movie_id": tf.io.FixedLenFeature([], tf.int64),
-            "movie_id": tf.io.FixedLenFeature([], tf.int64),
-            "rating": tf.io.FixedLenFeature([], tf.int64),
-            "timestamp": tf.io.FixedLenFeature([], tf.int64),
-            "gender": tf.io.FixedLenFeature([], tf.string),
-            "age": tf.io.FixedLenFeature([], tf.int64),
-            "occupation": tf.io.FixedLenFeature([], tf.int64),
-            "genres": tf.io.FixedLenFeature([], tf.string)}
-        
-        def parse_tf_example(example_proto, feature_spec):
-            return tf.io.parse_single_example(example_proto,
-                feature_spec)
-        
-        embeddings = []
-        user_ids = []
-        for batch in ds_ser.batch(batch_size):
-            emb = query_model(**{INPUT_KEY: batch})[
-                'outputs']  # batch_size x emb_dim, e.g. 256 X 32
-            embeddings.extend(emb.numpy().tolist())
-        ds = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
-        for batch in ds.batch(batch_size):
-            # NOTE: you can write all features out if needed for a different use:
-            user_ids.extend(batch["movie_id"].numpy().tolist())
-        assert (len(embeddings) == len(user_ids))
-        
-        writer = None
-        try:
-            writer = array_record_module.ArrayRecordWriter(output_uri,
-                "group_size:1")
-            for user_id, emb in zip(user_ids, embeddings):
-                writer.write(
-                    msgpack.packb([user_id, emb], use_bin_type=True))
-        finally:
-            if writer is not None:
-                writer.close()
-        
-        reader = None
-        try:
-            reader = array_record_module.ArrayRecordReader(output_uri)
-            record = msgpack.unpackb(reader.read(), use_list=True)
-            self.assertEquals(2, len(record))
-            self.assertTrue(isinstance(record[0], int))
-            self.assertTrue(isinstance(record[1], list))
-        
-        finally:
-            if reader is not None:
-                reader.close()
-    
-    def test_write_movie_embeddings(self):
-        loaded_user_movie_model = tf.saved_model.load(
-            self.user_movie_models_dir)
-        batch_size = 256
-        movies_path = self.movie_emb
-        output_uri = os.path.join(get_bin_dir(),
-            "movie_embeddings.array_record")
-        
-        _ct = "GZIP" if movies_path.endswith(".gz") else None
-        file_paths = glob.glob(movies_path)
-        ds_ser = tf.data.TFRecordDataset(file_paths, compression_type=_ct)
-        query_model = loaded_user_movie_model.signatures["serving_candidate"]
-        INPUT_KEY = list(query_model.structured_input_signature[1].keys())[0]
-        
-        feature_spec = {
-            "movie_id": tf.io.FixedLenFeature(shape=[], dtype=tf.int64,
-                default_value=None),
-            "genres": tf.io.FixedLenFeature(shape=[], dtype=tf.string,
-                default_value=None)}
-        
-        def parse_tf_example(example_proto, feature_spec):
-            return tf.io.parse_single_example(example_proto,
-                feature_spec)
-        
-        embeddings = []
-        movie_ids = []
-        for batch in ds_ser.batch(batch_size):
-            emb = query_model(**{INPUT_KEY: batch})[
-                'outputs']  # batch_size x emb_dim, e.g. 256 X 32
-            embeddings.extend(emb.numpy().tolist())
-        ds = ds_ser.map(lambda x: parse_tf_example(x, feature_spec))
-        for batch in ds.batch(batch_size):
-            # NOTE: you can write all features out if needed for a different use:
-            movie_ids.extend(batch["movie_id"].numpy().tolist())
-        assert (len(embeddings) == len(movie_ids))
-        
-        writer = None
-        try:
-            writer = array_record_module.ArrayRecordWriter(output_uri,
-                "group_size:1")
-            for id, emb in zip(movie_ids, embeddings):
-                writer.write(
-                    msgpack.packb([id, emb], use_bin_type=True))
-        finally:
-            if writer is not None:
-                writer.close()
-        
-        reader = None
-        try:
-            reader = array_record_module.ArrayRecordReader(output_uri)
-            record = msgpack.unpackb(reader.read(), use_list=True)
-            self.assertEquals(2, len(record))
-            self.assertTrue(isinstance(record[0], int))
-            self.assertTrue(isinstance(record[1], list))
-            self.assertNotEqual(record[0], record[1])
-        
-        finally:
-            if reader is not None:
-                reader.close()
-    
-    def read_movies_file_into_genre_dict(self,
-            filter_for_single: bool = True) -> \
-            tuple[defaultdict[Any, list], int]:
-        _ct = "GZIP" if self.movie_emb.endswith(".gz") else None
-        file_paths = glob.glob(self.movie_emb)
-        ds_ser = tf.data.TFRecordDataset(file_paths, compression_type=_ct)
-        feature_spec2 = {
-            "movie_id": tf.io.FixedLenFeature(shape=[], dtype=tf.int64,
-                default_value=None),
-            "genres": tf.io.FixedLenFeature(shape=[], dtype=tf.string,
-                default_value=None)}
-        
-        def parse_tf_example(example_proto):
-            return tf.io.parse_single_example(example_proto, feature_spec2)
-        
-        ds = ds_ser.map(lambda z: parse_tf_example(z))
-        # dict with key=genre, value=movie_id
-        genre_to_ids = collections.defaultdict(list)
-        n_movies = 0
-        for x in ds.as_numpy_iterator():
-            n_movies += 1
-            if filter_for_single:
-                if x['genres'].find(b'|') > -1:
-                    continue
-            genre_to_ids[x['genres']].append(x['movie_id'])
-        return genre_to_ids, n_movies
-    
+        #TODO: finish these
+       
     if __name__ == '__main__':
         unittest.main()

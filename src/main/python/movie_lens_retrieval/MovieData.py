@@ -2,7 +2,7 @@ import tensorflow as tf
 import polars as pl
 
 class MovieData(object):
-    def __init__(self, movie_path:str, offset:int=6040):
+    def __init__(self, movie_path:str, offset:int=6041):
         """
         given path to movie file, creates a datastructure for movie_id access
         :param movie_path: path to the users.dat file containing fields movie_id, title, genrese.
@@ -11,7 +11,7 @@ class MovieData(object):
         """
         if not movie_path.endswith(".parquet"):
             print(f'WARNING: expecting input file to be a parquet file')
-        self.offset = offset
+        self.offset = tf.constant(offset, dtype=tf.int64)
         df = pl.read_parquet(movie_path)
         
         df = df.sort('movie_id')
@@ -33,7 +33,7 @@ class MovieData(object):
            is -1, it gets reset to tf.timestamp().
         :return:
         """
-        idx = movie_id - 1 - self.offset
+        idx = tf.subtract(movie_id, self.offset)
         return {
             'movie_id': movie_id,
             'genres': tf.gather(self.genres, idx)

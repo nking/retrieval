@@ -1,26 +1,8 @@
-import collections
 import os.path
 import time
 import unittest
-import glob
-from collections import defaultdict
-from typing import Any, Dict
-
-from scipy.stats import hypergeom, combine_pvalues
-from six import moves
-from sklearn.metrics import ndcg_score, average_precision_score
-import polars as pl
+from typing import Dict
 import numpy as np
-import plotly.express as px  # needs kaleido to write pngs
-from plotly.subplots import make_subplots
-
-import msgpack
-import msgpack_numpy as m  # Optional: helps if you have raw numpy arrays
-
-from movie_lens_retrieval.misc.Bayesian import BayesianAvg
-
-m.patch()  # Makes msgpack understand numpy types automatically
-from array_record.python import array_record_module
 
 from helper import *
 from movie_lens_retrieval.Retriever import Retriever, EmbeddingType
@@ -71,7 +53,7 @@ class TestRetrieval(unittest.TestCase):
             user_movie_hist_path_patterns=self.user_movie_hist_path_patterns,
             max_k=max_k)
     
-    def test_format_construct_inputs_only_to_dict_tensors(self):
+    def test_format_construct_inputs(self):
     
         '''
         ways to provide inputs to the Retriever:
@@ -231,7 +213,6 @@ class TestRetrieval(unittest.TestCase):
         emb_type = EmbeddingType.MOVIE
         
         for i, inp in enumerate(test_inps):
-            print(f'Test2 {i}')
             outp:Dict[str, tf.Tensor] = rr.create_dictionary_of_tensors(emb_type, inp)
             self.assertTrue(isinstance(outp, dict))
             self.assertTrue(key in outp)
@@ -249,7 +230,6 @@ class TestRetrieval(unittest.TestCase):
                     self.assertTrue(tf.reduce_all(tf.equal(outp[key], test_inps[0])))
                 
         for i, inp in enumerate(test_inps):
-            print(f'Test3 {i}')
             outp: Dict[str, tf.Tensor] = rr.create_dictionary_of_tensors(emb_type, inp)
             self.assertTrue(isinstance(outp, dict))
             for k in outp_expected_all.keys():

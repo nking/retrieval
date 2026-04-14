@@ -48,6 +48,10 @@ class TestRetrieval(unittest.TestCase):
         self.movies_path = os.path.join(get_project_dir(),
             "src/test/resources/data/movies/movies.parquet")
         
+        self.user_movie_hist_path_patterns = [os.path.join(get_project_dir(), "src/test/resources/data/ratings_train/ratings_train.array_record"),
+            os.path.join(get_project_dir(),
+                "src/test/resources/data/ratings_val/ratings_val.array_record")
+            ]
         self.max_k = 10
         
     def test_read_cold_start_movies(self):
@@ -64,6 +68,7 @@ class TestRetrieval(unittest.TestCase):
             cold_start_movie_path=self.cold_start_path,
             users_path=self.users_path,
             movies_path=self.movies_path,
+            user_movie_hist_path_patterns=self.user_movie_hist_path_patterns,
             max_k=max_k)
     
     def test_format_construct_inputs_only_to_dict_tensors(self):
@@ -322,6 +327,12 @@ class TestRetrieval(unittest.TestCase):
     def test_build_scann_searcher_large(self):
         pass
     
+    def test_load_histories(self):
+        
+        user_hist_dict, max_hist = Retriever._read_user_ratings_histories(self.user_movie_hist_path_patterns)
+        self.assertTrue(len(user_hist_dict) > 2000)
+        self.assertTrue(max_hist > 20)
+        
     def test_retrieval(self):
         '''
         def __init__(self, user_movie_saved_model_dir: str,
@@ -333,8 +344,58 @@ class TestRetrieval(unittest.TestCase):
         ):
         :return:
         '''
+        
         rr = self._construct_Retrieval(max_k=1000)
-        #TODO: finish these
-       
+        self.assertTrue(rr.max_hist > 200)
+        
+        ts = int(time.time())
+        
+        '''
+        635::M::56::17::33785
+        1875::M::35::12::94107
+        6040::M::25::6::11106
+        '''
+        
+        user_test_dict = \
+            {'user_id': tf.constant([[635], [1875], [6040]], dtype=tf.int64),
+                'gender': tf.constant([['M'], ['M'], ['M']], dtype=tf.string),
+                'age': tf.constant([[56], [35], [25]], dtype=tf.int64),
+                'occupation': tf.constant([[17], [12], [6]], dtype=tf.int64),
+                'timestamp': tf.constant([[ts], [ts], [ts]], dtype=tf.int64),
+            }
+        
+        movie_test_dict = \
+            {'movie_id': tf.constant([[6041], [6042]], dtype=tf.int64),
+                'genres': tf.constant([["Animation|Children's|Comedy"],
+                    ["Adventure|Children's|Fantasy"]],
+                    dtype=tf.string),
+            }
+        
+        n_users = len(user_test_dict['user_id'])
+        n_movies = len(movie_test_dict['movie_id'])
+        
+        user_histories = rr.get_user_history(user_test_dict['user_id'])
+        self.assertEqual(len(user_histories), n_users)
+        for hist in user_histories:
+            self.assertTrue(len(hist) > 0)
+        
+        top_k = 2
+        
+        sim_users_q0_0 = rr.get_users_given_users(user_test_dict, top_k=top_k)
+        self.assertTrue(isinstance(sim_users_q0_0, np.ndarray))
+        self.assertTrue(sim_users_q0_0.shape == (n_users, top_k))
+        
+        sim_movies_q0_1 = rr.get_movies_given_users(user_test_dict, top_k=top_k, rm_hist=True)
+        self.assertTrue(sim_movies_q0_1.shape == (n_users, top_k))
+        
+        sim_movies_q0_2 = rr.get_movies_given_users(user_test_dict, top_k=top_k, rm_hist=False)
+        self.assertTrue(sim_movies_q0_2.shape == (n_users, top_k))
+        
+        sim_movies_q1_0 = rr.get_movies_given_movies(movie_test_dict, top_k=top_k)
+        self.assertTrue(sim_movies_q1_0.shape == (n_movies, top_k))
+        
+        sim_users_q1_1 = rr.get_users_given_movies(movie_test_dict, top_k=top_k)
+        self.assertTrue(sim_users_q1_1.shape == (n_movies, top_k))
+        
     if __name__ == '__main__':
         unittest.main()

@@ -1,10 +1,14 @@
-from typing import Union, List, Dict, Tuple
+from typing import Union, List, Dict, Tuple, Set
+
+import numpy as np
 import tensorflow as tf
 # from google.protobuf import text_format
 import glob
-
 from enum import Enum
 from absl import logging
+from collections import defaultdict
+from array_record.python import array_record_module
+import msgpack
 
 from movie_lens_retrieval.MovieData import MovieData
 from movie_lens_retrieval.UserData import UserData
@@ -60,8 +64,8 @@ class Retriever:
             cold_start_movie_path: str,
             users_path: str,
             movies_path: str,
+            user_movie_hist_path_patterns: List[str],
             max_k: int = 1000,
-            
     ):
         """
         :param user_movie_saved_model_dir: path to the saved_model directory 
@@ -103,6 +107,9 @@ class Retriever:
         
         self.movie_indexers, self.movie_indexers_ids = Retriever._create_movie_indexer(
             movie_embed_path, self.max_k, self.embed_dim)
+        
+        self.user_history_dict, self.max_hist = Retriever._read_user_ratings_histories(
+            user_movie_hist_path_patterns)
     
     @staticmethod
     def _create_indexer_and_tables(embedding_type: EmbeddingType,
@@ -431,18 +438,19 @@ class Retriever:
         output_keyword = list(infer_for_dict.structured_outputs.keys())[0]
         return embeddings_list[output_keyword]
     
-    def get_users_given_users(self, inputs: Dict[str, tf.Tensor], top_k: int):
+    def get_users_given_users(self, inputs: Dict[str, tf.Tensor], top_k: int) -> np.ndarray:
         """
         given user query data, get nearest users
         :param inputs: dictionary of tensors
         :param top_k:
         :return: list of lists of top_k user_ids similar to those in user_data.
         """
-        return self._get_ann_ids(inp_data_type=EmbeddingType.USER,
-            lookup_type=EmbeddingType.USER, inp_data=inputs, top_k=top_k)
+        neear_ids = self._get_ann_ids(inp_data_type=EmbeddingType.USER,
+            lookup_type=EmbeddingType.USER, inp_data=inputs, top_k=top_k, rm_hist = False)
+        return neear_ids
     
     def _get_ann_ids(self, inp_data_type: EmbeddingType,
-            lookup_type: EmbeddingType, inp_data: Dict[str, tf.Tensor], top_k: int):
+            lookup_type: EmbeddingType, inp_data: Dict[str, tf.Tensor], top_k: int, rm_hist:bool=False) -> np.ndarray:
         """
         get the nearest neighbor embeddings of lookup_type to the embedding to be made for inp_data of inp_data_type
         :param inp_data: dictionary of tensors where keys are for the inp_data_type model.
@@ -467,19 +475,40 @@ class Retriever:
             
         embeddings_tensor = self._create_embeddings(inp_data_type, inp_data)
         if lookup_type == EmbeddingType.USER:
-            neighbor_idxs, distances = self.user_indexers.search_batched(embeddings_tensor, top_k)
+            neighbor_idxs, cos_sim = self.user_indexers.search_batched(embeddings_tensor, top_k)
             #neighbor_idxs are user_id - 1 so add 1
             #neighbor idxs are 2D numpy arrays
-            nearest_ids = [[idx + 1 for idx in near] for near in neighbor_idxs]
+            nearest_ids = neighbor_idxs + 1
         else:
-            neighbor_idxs, distances = self.movie_indexers.search_batched(embeddings_tensor, top_k)
+            k = top_k + self.max_hist if rm_hist else top_k
+            neighbor_idxs, cos_sim = self.movie_indexers.search_batched(embeddings_tensor, k)
             # neighbor_idxs are 0 to n_movies-1 so add 1 then add movie_id_offset
             # neighbor idxs are 2D numpy arrays
-            nearest_ids = [[idx + 1 + self.movie_id_offset for idx in near] for near in neighbor_idxs]
-        
+            nearest_ids = neighbor_idxs + self.movie_id_offset
+            if rm_hist:
+                nearest_ids = self.filter_watched(inp_data['user_id'], nearest_ids, top_k)
+                nearest_ids = np.array(nearest_ids)
         return nearest_ids
     
-    def get_movies_given_movies(self, movie_data: Dict[str, tf.Tensor], top_k: int):
+    def get_user_history(self, user_ids: tf.Tensor) -> List[Set[int]]:
+        out = []
+        for i, user_id in enumerate(user_ids.numpy()):
+            history = self.user_history_dict.get(user_id[0], set())
+            out.append(history)
+        return out
+    
+    def filter_watched(self, user_ids: tf.Tensor, nearest_movie_ids: np.ndarray,
+        top_k:int=10) -> List[List[int]]:
+        filtered_results = []
+        # Convert TF tensor to numpy for the loop if it isn't already
+        u_ids_np = user_ids.numpy()
+        for i, user_id in enumerate(u_ids_np):
+            history = self.user_history_dict.get(user_id[0], set())
+            clean_row = [m_id for m_id in nearest_movie_ids[i] if m_id not in history][:top_k]
+            filtered_results.append(clean_row)
+        return filtered_results
+    
+    def get_movies_given_movies(self, movie_data: Dict[str, tf.Tensor], top_k: int) -> np.ndarray:
         """
         get nearest movies to given movie data
         :param movie_data: dictionary or list of dictionaries of inputs where keys must be all columns from the joined ratings file that the models
@@ -488,9 +517,9 @@ class Retriever:
         :return: list of lists of top_k movie ids similar to those in movie_data.
         """
         return self._get_ann_ids(inp_data_type=EmbeddingType.MOVIE,
-            lookup_type=EmbeddingType.MOVIE, inp_data=movie_data, top_k=top_k)
+            lookup_type=EmbeddingType.MOVIE, inp_data=movie_data, top_k=top_k, rm_hist=False)
     
-    def get_users_given_movies(self, movie_data: Dict[str, tf.Tensor], top_k: int):
+    def get_users_given_movies(self, movie_data: Dict[str, tf.Tensor], top_k: int) -> np.ndarray:
         """
         get nearest users to given movie data
         :param movie_data: dictionary or list of dictionaries of inputs where keys must be all columns from the joined ratings file that the models
@@ -499,9 +528,9 @@ class Retriever:
         :return: list of lists of top_k user ids similar to those in movie_data.
         """
         return self._get_ann_ids(inp_data_type=EmbeddingType.MOVIE,
-            lookup_type=EmbeddingType.USER, inp_data=movie_data, top_k=top_k)
+            lookup_type=EmbeddingType.USER, inp_data=movie_data, top_k=top_k, rm_hist=False)
     
-    def get_movies_given_users(self, user_data: Dict[str, tf.Tensor], top_k: int):
+    def get_movies_given_users(self, user_data: Dict[str, tf.Tensor], top_k: int, rm_hist:bool=True) -> np.ndarray:
         """
         get nearest movies to given user data
         :param user_data: dictionary or list of dictionaries of inputs where keys must be all columns from the joined ratings file that the models
@@ -510,7 +539,7 @@ class Retriever:
         :return: list of lists of top_k user ids similar to those in movie_data.
         """
         return self._get_ann_ids(inp_data_type=EmbeddingType.USER,
-            lookup_type=EmbeddingType.MOVIE, inp_data=user_data, top_k=top_k)
+            lookup_type=EmbeddingType.MOVIE, inp_data=user_data, top_k=top_k, rm_hist=rm_hist)
     
     def user_is_known(self, user_id) -> bool:
         return self.user_data.user_exists(user_id)
@@ -542,4 +571,40 @@ class Retriever:
             # f is an iterator; this is highly optimized in CPython
             numbers = [int(line) for line in f]
         return numbers
+    
+    @staticmethod
+    def _read_user_ratings_histories(path_patterns: List[str], batch_size:int=2048) -> Tuple[defaultdict, int]:
+        """
+        read in array_records
+        :param path_patterns:
+        :return:
+        """
+        d = defaultdict(set)
+        file_paths = []
+        for path_pattern in path_patterns:
+            _paths = glob.glob(path_pattern)
+            if len(_paths) == 0:
+                raise ValueError(f"no files found at: {path_pattern}")
+            file_paths.extend(_paths)
+        for file_path in file_paths:
+            reader = None
+            try:
+                reader = array_record_module.ArrayRecordReader(file_path)
+                n = reader.num_records()
+                for i in range(0, n, batch_size):
+                    i_end = i + batch_size
+                    if i_end >= n:
+                        i_end = n
+                    batch_bytes = reader.read([x for x in range(i, i_end)])
+                    data = [msgpack.unpackb(b, use_list=False) for b in
+                        batch_bytes]  # list of tuples of 4 integers
+                    for record in data:
+                        d[int(record[0])].add(int(record[1]))
+            finally:
+                if reader is not None:
+                    reader.close()
+        max_hist = 0
+        for k, v in d.items():
+            max_hist = max(max_hist, len(v))
+        return d, max_hist
     

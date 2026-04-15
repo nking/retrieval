@@ -7,8 +7,6 @@ import numpy as np
 from helper import *
 from movie_lens_retrieval.Retriever import Retriever, EmbeddingType
 
-MOVIE_OFFSET = 6040 + 1
-
 class TestRetrieval(unittest.TestCase):
     def setUp(self):
         
@@ -35,6 +33,7 @@ class TestRetrieval(unittest.TestCase):
                 "src/test/resources/data/ratings_val/ratings_val.array_record")
             ]
         self.max_k = 10
+        self.MOVIE_OFFSET = 6040 + 1
         
     def test_read_cold_start_movies(self):
         cold_start_movie_list = Retriever._read_cold_start(self.cold_start_path)
@@ -43,7 +42,7 @@ class TestRetrieval(unittest.TestCase):
         
     def _construct_Retrieval(self, max_k) -> Retriever:
         return Retriever(user_movie_saved_model_dir=self.user_movie_models_dir,
-            movie_id_offset = MOVIE_OFFSET,
+            movie_id_offset = self.MOVIE_OFFSET,
             user_embed_path=self.user_emb,
             movie_embed_path=self.movie_emb,
             embed_dim=self.embed_dim,

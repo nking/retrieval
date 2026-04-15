@@ -1,6 +1,14 @@
 # retrieval
-project to retrieve and rank recommendations, built
-upon models and data written from the project:
+project for fast retrieval of movie recomendations
+via approximate nearest neighbor searches in
+embedding vector space using user-to-movie, 
+user-to-user, movie-to-user, and or movie-to-movie
+similarities.
+There is also a cold-start list made from calculating
+the bayesian average of all movie ratings.
+
+The embeddings were trained by a listwise contrastive 
+bi-encoder in the project:
 https://github.com/nking/recommender_systems.git
 
 instructions:

@@ -14,6 +14,8 @@ import msgpack
 from array_record.python import array_record_module
 
 from helper import *
+from rich import print as rprint
+
 from movie_lens_retrieval.Retriever import Retriever, EmbeddingType
 
 '''
@@ -225,10 +227,17 @@ class CalcMetrics(unittest.TestCase):
         #calc metrics using vectorized ops:
         results = self._calculate_metrics(rec_movies, ordered_user_ids,
             user_ground_truth_set, user_relevance_map, k=20)
-        print(results)
+        rprint(results)
+        '''
+        {
+            'hit_rate_20': 0.49663299663299665,
+            'recall_20': 0.03736773380777989,
+            'mrr_20': 0.16019396576232348,
+            'ndcg_20': 0.06371890045798831
+        }'''
         
     def _calculate_metrics(self, recommendations:np.ndarray, user_ids:np.ndarray,
-        users_ground_truth_set:dict, relevance_map:dict, k:int=20) -> Dict[str, np.float32]:
+        users_ground_truth_set:dict, relevance_map:dict, k:int=20) -> Dict[str, float]:
         
         hits_list = []
         recalls = []
@@ -238,6 +247,8 @@ class CalcMetrics(unittest.TestCase):
         for i, u_id in enumerate(user_ids):
             # Get the top K recommendations for this user
             top_k_rec = recommendations[i][:k]
+            
+            u_id = u_id[0]
             
             # Get the ground truth (what they actually watched/rated)
             truth_set = users_ground_truth_set.get(u_id, set())
@@ -275,10 +286,10 @@ class CalcMetrics(unittest.TestCase):
             ndcgs.append(dcg / idcg if idcg > 0 else 0.0)
     
         return {
-            f"hit_rate_{k}": np.mean(hits_list),
-            f"recall_{k}": np.mean(recalls),
-            f"mrr_{k}": np.mean(mrrs),
-            f"ndcg_{k}": np.mean(ndcgs)
+            f"hit_rate_{k}": np.mean(hits_list).item(),
+            f"recall_{k}": np.mean(recalls).item(),
+            f"mrr_{k}": np.mean(mrrs).item(),
+            f"ndcg_{k}": np.mean(ndcgs).item()
         }
 
     def test_eval_single_genre(self):
@@ -292,7 +303,7 @@ class CalcMetrics(unittest.TestCase):
         this narrow group  will receive broadened recommendations that may be more diverse.
         """
         
-        top_ks = [20, 50, 100, 200, 1000]
+        top_ks = [20]#, 50, 100, 200, 1000]
         
         # Note: SciPy uses different labels:
         # M = Total population
@@ -304,13 +315,13 @@ class CalcMetrics(unittest.TestCase):
         df_test_users = pl.read_parquet(os.path.join(get_project_dir(),
             "src/test/resources/data/single_genre/users_single_genre.parquet"))
         df_test_users = df_test_users.drop('zipcode')
-        print(f'df_test_users.count: {df_test_users.count()}')
-        # columns=['movie_id', 'gender', 'age', 'occupation']
+        # columns=['user_id', 'gender', 'age', 'occupation']
+        print(f'users_single_genre count: {df_test_users.count()}')
         
         df_test_ratings = self._read_ratings_array_record(
             os.path.join(get_project_dir(),
                 'src/test/resources/data/ratings_test_liked/ratings_test_liked.array_record'))
-        df_test_ratings = df_test_ratings.join(df_test_ratings, on='user_id', how='inner')
+        df_test_ratings = df_test_ratings.join(df_test_users, on='user_id', how='semi')
         
         # ======== get recommendations for those single genres users ======
         df_test_ratings_per_user = df_test_ratings.group_by('user_id').agg(
@@ -321,8 +332,10 @@ class CalcMetrics(unittest.TestCase):
             pl.col('user_id'),
             pl.col('movie_id').alias('movie_ids'),
             pl.col('rating').alias('movie_ratings'),
-            pl.col('timestamp')
+            pl.col('timestamp').cast(pl.Int64)
         ))
+        print(f'df_test_ratings_per_user count: {df_test_ratings_per_user.count()}')
+        
         arrow_table = df_test_ratings_per_user.select(['user_id', 'timestamp']).to_arrow()
         inp_tensor_dict = {
             name: tf.convert_to_tensor(arrow_table.column(name).to_numpy())
@@ -351,18 +364,11 @@ class CalcMetrics(unittest.TestCase):
         inp_hg_df = df_test_ratings.join(df_movies, on='movie_id', how='left')
         inp_hg_df = inp_hg_df.unique(subset=["user_id"], keep="first")
         inp_hg_df = inp_hg_df.select(['user_id', 'genres'])
-        del df_movies
+        df_movies = df_movies.group_by('genres').agg(
+            pl.col('movie_id').alias('all_genre_movies'))
         
-        ## dict of (key=genre, value=list of movie_ids), N = total number of movies
-        genres_to_movies_dict, n_movies_2 = self.read_movies_file_into_genre_dict()
-        genre_df = pl.DataFrame(
-            [(k, v) for k, v in genres_to_movies_dict.items()],
-            schema=["genres", "all_genre_movies"],
-            orient="row"
-        )
-        inp_hg_df = inp_hg_df.join(genre_df, on='genres', how='left') #[user_id, genres, all_genre_movies
-        del genres_to_movies_dict
-        del genre_df
+        inp_hg_df = inp_hg_df.join(df_movies, on='genres', how='left') #[user_id, genres, all_genre_movies
+        del df_movies
         
         #join user history of movies
         M_df = pl.DataFrame(
@@ -400,13 +406,13 @@ class CalcMetrics(unittest.TestCase):
         # k = intersection of top_k recommendations with ratings_test_liked for user
         # prob_more_than_k = hypergeom.sf(k, M, n, N)
         
-        results = []
+        print(f'inp_hg_df={inp_hg_df}')
         
         user_ids = inp_tensor_dict['user_id'].numpy()
         for top_k in top_ks:
             recommended = rec_movies[:, :top_k]
             rec_df = pl.DataFrame(
-                [(u, r) for u, r in zip(user_ids, recommended)],
+                [(u[0], r) for u, r in zip(user_ids, recommended)],
                 schema=["user_id", "recommended"],
                 orient="row"
             )
@@ -425,8 +431,7 @@ class CalcMetrics(unittest.TestCase):
             n_tensor = tf.constant(df2['n'].to_numpy(), dtype=tf.float32)
             N_tensor = tf.constant(df2['N'].to_numpy(), dtype=tf.float32)
             
-            sf_results = self.vectorized_hypergeom_sf(k_obs_tensor, M_tensor,
-                n_tensor, N_tensor)
+            sf_results = self.vectorized_hypergeom_sf(k_obs_tensor, M_tensor, n_tensor, N_tensor)
             
             name = f"survival_prob_{top_k}"
             df2 = df2.with_columns(
@@ -515,32 +520,6 @@ class CalcMetrics(unittest.TestCase):
         if show:
             fig.show()
         del fig
-    
-    def read_movies_file_into_genre_dict(self, filter_for_single: bool = True) -> \
-            tuple[defaultdict[str, list], int]:
         
-        _ct = "GZIP" if self.movie_emb.endswith(".gz") else None
-        file_paths = glob.glob(self.movie_emb)
-        ds_ser = tf.data.TFRecordDataset(file_paths, compression_type=_ct)
-        feature_spec2 = {
-            "movie_id": tf.io.FixedLenFeature(shape=[], dtype=tf.int64,
-                default_value=None),
-            "genres": tf.io.FixedLenFeature(shape=[], dtype=tf.string,
-                default_value=None)}
-        def parse_tf_example(example_proto):
-            return tf.io.parse_single_example(example_proto, feature_spec2)
-        
-        ds = ds_ser.map(lambda z: parse_tf_example(z))
-        # dict with key=genre, value=list of movie_ids
-        genre_to_ids = collections.defaultdict(list)
-        n_movies = 0
-        for x in ds.as_numpy_iterator():
-            n_movies += 1
-            if filter_for_single:
-                if x['genres'].find(b'|') > -1:
-                    continue
-            genre_to_ids[x['genres']].append(x['movie_id'])
-        return genre_to_ids, n_movies
-    
     if __name__ == '__main__':
         unittest.main()

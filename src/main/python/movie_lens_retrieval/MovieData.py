@@ -17,7 +17,7 @@ class MovieData(object):
         df = df.sort('movie_id')
         self.title = tf.constant(df['title'].to_numpy(), name='movie_title', dtype=tf.string)
         self.genres = tf.constant(df['genres'].to_numpy(), name='movie_genres', dtype=tf.string)
-        self.num_users = len(df)
+        self.num_movies = len(df)
         del df
     
     @tf.function(input_signature=[

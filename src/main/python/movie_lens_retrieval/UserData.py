@@ -10,8 +10,8 @@ class UserData(object):
         :param users_path: path to the users.dat file containing fields movie_id, gender, age, occupation, zipcode.
         For now, provide a parquet file.  Also note that the user_ids must be ordered from 1 to N.
         """
-        if not users_path.endswith(".parquet"):
-            print(f'WARNING: expecting input file to be a parquet file')
+        if not users_path.endswith(".array_record"):
+            print(f'WARNING: expecting input file to be a array_record file')
             
         df = pl.read_parquet(users_path)
         df = df.sort('user_id')
@@ -41,9 +41,7 @@ class UserData(object):
         idx = user_id - tf.constant(1, dtype=tf.int64)
         now = tf.cast(tf.timestamp(), tf.int64)
         resolved_ts = tf.where(
-            tf.equal(timestamp, -1),
-            now,
-            timestamp
+            tf.equal(timestamp, -1), now, timestamp
         )
         
         return {

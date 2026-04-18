@@ -29,7 +29,8 @@ class TestRetrieval(unittest.TestCase):
         self.movies_path = os.path.join(get_project_dir(),
             "src/test/resources/data/movies/movies.parquet")
         
-        self.user_movie_hist_path_patterns = [os.path.join(get_project_dir(), "src/test/resources/data/ratings_train/ratings_train.array_record"),
+        self.user_movie_hist_path_patterns = [os.path.join(get_project_dir(),
+            "src/test/resources/data/ratings_train/ratings_train.array_record"),
             os.path.join(get_project_dir(),
                 "src/test/resources/data/ratings_val/ratings_val.array_record")
             ]
@@ -41,7 +42,7 @@ class TestRetrieval(unittest.TestCase):
         self.assertTrue(len(cold_start_movie_list) > 3000)
         self.assertTrue(isinstance(cold_start_movie_list[0], int))
         
-    def _construct_Retrieval(self, max_k) -> Retriever:
+    def _construct_Retrieval_using_train_val(self, max_k) -> Retriever:
         return Retriever(user_movie_saved_model_dir=self.user_movie_models_dir,
             movie_id_offset = self.MOVIE_OFFSET,
             user_embed_path=self.user_emb,
@@ -52,7 +53,7 @@ class TestRetrieval(unittest.TestCase):
             movies_path=self.movies_path,
             user_movie_hist_path_patterns=self.user_movie_hist_path_patterns,
             max_k=max_k)
-    
+
     def test_retrieval(self):
         '''
         def __init__(self, user_movie_saved_model_dir: str,
@@ -65,7 +66,7 @@ class TestRetrieval(unittest.TestCase):
         :return:
         '''
         
-        rr = self._construct_Retrieval(max_k=3883)
+        rr = self._construct_Retrieval_using_train_val(max_k=3883)
         self.assertTrue(rr.max_hist > 200)
         
         # first timestamp from test is 978133414
@@ -86,7 +87,7 @@ class TestRetrieval(unittest.TestCase):
         self.assertTrue(recommended_movies.shape == (n_users, top_k))
         
         #write to array_records
-        outfile = os.path.join(get_bin_dir(), "recommended_movies.array_record")
+        outfile = os.path.join(get_bin_dir(), "recommended_movies_minus_train_val.array_record")
         writer = None
         try:
             writer = array_record_module.ArrayRecordWriter(outfile, 'group_size:1')
@@ -129,7 +130,7 @@ class TestRetrieval(unittest.TestCase):
         writes those negatives to array_record format file
         """
         
-        rr = self._construct_Retrieval(max_k=3883)
+        rr = self._construct_Retrieval_using_train_val(max_k=3883)
         self.assertTrue(rr.max_hist > 200)
         
         # first timestamp from test is 978133414
@@ -150,27 +151,54 @@ class TestRetrieval(unittest.TestCase):
         #(1)  np.ndarray:
         recommended_movies = rr.get_movies_given_users(user_inp_dict, top_k=top_k, rm_hist=False)
         self.assertTrue(recommended_movies.shape == (n_users, top_k))
+      
         #put into polars dataframe
         rec_df = pl.DataFrame(
             [(u[0], r) for u, r in zip(user_inp_dict['user_id'].numpy(), recommended_movies)],
-            schema=["user_id", "recommended"],
+            schema={
+                "user_id": pl.Int64,
+                "recommended": pl.List(pl.Int64)
+            },
             orient="row"
         )
+        print(f'rec_df={rec_df}', flush=True)
         
         #(2) read the disliked from train and val, separately
         ratings_train_disliked_df = self._read_ratings_array_record(
             os.path.join(get_project_dir(),
                 "src/test/resources/data/ratings_train_disliked/ratings_train_disliked.array_record")
         )
-        ratings_train_disliked_df = ratings_train_disliked_df.group_by('user_id').agg(
-            [pl.col("movie_id").sort_by("rating", descending=True)])
-    
+        ratings_train_disliked_df=ratings_train_disliked_df.drop("timestamp")
         ratings_val_disliked_df = self._read_ratings_array_record(
             os.path.join(get_project_dir(),
                 "src/test/resources/data/ratings_val_disliked/ratings_val_disliked.array_record")
         )
+        ratings_val_disliked_df=ratings_val_disliked_df.drop("timestamp")
+        ratings_test_disliked_df = self._read_ratings_array_record(
+            os.path.join(get_project_dir(),
+                "src/test/resources/data/ratings_test_disliked/ratings_test_disliked.array_record")
+        )
+        ratings_test_disliked_df= ratings_test_disliked_df.drop("timestamp")
+        ratings_train_val_disliked_df = pl.concat([ratings_train_disliked_df,ratings_val_disliked_df],
+            how="vertical", rechunk=True)
+        ratings_train_val_test_disliked_df = pl.concat([ratings_train_val_disliked_df, ratings_test_disliked_df],
+            how="vertical", rechunk=True)
+        
+        ratings_train_disliked_df = ratings_train_disliked_df.group_by(
+            'user_id').agg(
+            [pl.col("movie_id").sort_by("rating", descending=True)])
         ratings_val_disliked_df = ratings_val_disliked_df.group_by(
-            'user_id').agg([pl.col("movie_id").sort_by("rating", descending=True)])
+            'user_id').agg(
+            [pl.col("movie_id").sort_by("rating", descending=True)])
+        ratings_test_disliked_df = ratings_test_disliked_df.group_by(
+            'user_id').agg(
+            [pl.col("movie_id").sort_by("rating", descending=True)])
+        ratings_train_val_disliked_df = ratings_train_val_disliked_df.group_by(
+            'user_id').agg(
+            [pl.col("movie_id").sort_by("rating", descending=True)])
+        ratings_train_val_test_disliked_df = ratings_train_val_test_disliked_df.group_by(
+            'user_id').agg(
+            [pl.col("movie_id").sort_by("rating", descending=True)])
         
         #intersection of train disliked with rec_df
         inter_train_df = ratings_train_disliked_df.join(rec_df, on='user_id', how='left')
@@ -180,26 +208,94 @@ class TestRetrieval(unittest.TestCase):
         inter_train_df = inter_train_df.with_columns(
             easy_neg=pl.col("movie_id").list.set_difference(pl.col("hard_neg"))
         )
-        inter_train_df = inter_train_df.with_columns(
-            negatives=pl.col("hard_neg").list.concat(pl.col("easy_neg"))
-        )
-        
+       
         #intersection of val disliked with rec_df
         inter_val_df = ratings_val_disliked_df.join(rec_df, on='user_id', how='left')
         inter_val_df = inter_val_df.with_columns(
-            hard_neg=pl.col("movie_id").list.set_intersection(pl.col("recommended"))
+            hard_neg = pl.col("movie_id").list.set_intersection(pl.col("recommended"))
         )
         inter_val_df = inter_val_df.with_columns(
+            easy_neg = pl.col("movie_id").list.set_difference(pl.col("hard_neg"))
+        )
+        
+        # intersection of test disliked with rec_df
+        inter_test_df = ratings_test_disliked_df.join(rec_df, on='user_id',
+            how='left')
+        inter_test_df = inter_test_df.with_columns(
+            hard_neg=pl.col("movie_id").list.set_intersection(pl.col("recommended"))
+        )
+        inter_test_df = inter_test_df.with_columns(
             easy_neg=pl.col("movie_id").list.set_difference(pl.col("hard_neg"))
+        )
+        
+        inter_train_val_df = ratings_train_val_disliked_df.join(rec_df, on='user_id', how='left')
+        inter_train_val_df = inter_train_val_df.with_columns(
+            hard_neg=pl.col("movie_id").list.set_intersection(pl.col("recommended"))
+        )
+        inter_train_val_df = inter_train_val_df.with_columns(
+            easy_neg=pl.col("movie_id").list.set_difference(pl.col("hard_neg"))
+        )
+        
+        inter_train_val_test_df = ratings_train_val_test_disliked_df.join(rec_df,
+            on='user_id',
+            how='left')
+        inter_train_val_test_df = inter_train_val_test_df.with_columns(
+            hard_neg=pl.col("movie_id").list.set_intersection(pl.col("recommended"))
+        )
+        inter_train_val_test_df = inter_train_val_test_df.with_columns(
+            easy_neg=pl.col("movie_id").list.set_difference(pl.col("hard_neg"))
+        )
+        
+
+        inter_train_df = inter_train_df.with_columns(
+            negatives=pl.col("hard_neg").list.concat(pl.col("easy_neg"))
         )
         inter_val_df = inter_val_df.with_columns(
             negatives=pl.col("hard_neg").list.concat(pl.col("easy_neg"))
         )
+        inter_test_df = inter_test_df.with_columns(
+            negatives=pl.col("hard_neg").list.concat(pl.col("easy_neg"))
+        )
+        inter_train_val_df = inter_train_val_df.with_columns(
+            negatives=pl.col("hard_neg").list.concat(pl.col("easy_neg"))
+        )
+        inter_train_val_test_df = inter_train_val_test_df.with_columns(
+            negatives=pl.col("hard_neg").list.concat(pl.col("easy_neg"))
+        )
+        
+        print(
+            f'train min_negatives_length={inter_train_df.select(pl.col("negatives").list.len().min()).item()}')  # 635
+        print(
+            f'train max_negatives_length={inter_train_df.select(pl.col("negatives").list.len().max()).item()}')  # 635
+        print(
+            f'val min_negatives_length={inter_val_df.select(pl.col("negatives").list.len().min()).item()}')  # 635
+        print(
+            f'val max_negatives_length={inter_val_df.select(pl.col("negatives").list.len().max()).item()}')  # 635
+        print(
+            f'test min_negatives_length={inter_test_df.select(pl.col("negatives").list.len().min()).item()}')  # 635
+        print(
+            f'test max_negatives_length={inter_test_df.select(pl.col("negatives").list.len().max()).item()}')  # 635
+        
+        print(
+            f'train+val min_negatives_length={inter_train_val_df.select(pl.col("negatives").list.len().min()).item()}')  # 635
+        print(
+            f'train+val max_negatives_length={inter_train_val_df.select(pl.col("negatives").list.len().max()).item()}')  # 635
+        print(
+            f'train+val+test min_negatives_length={inter_train_val_test_df.select(pl.col("negatives").list.len().min()).item()}')  # 635
+        print(
+            f'train+val+test max_negatives_length={inter_train_val_test_df.select(pl.col("negatives").list.len().max()).item()}')  # 635
         
         #write user_id, negatives to array_record
-        for outfile, df in zip([os.path.join(get_bin_dir(), "train_negatives.array_record"),
-            os.path.join(get_bin_dir(), "val_negatives.array_record")], [inter_train_df, inter_val_df]):
-            data_to_write = df.select(["user_id", "negatives"])
+        for outfile, df in zip(
+            [os.path.join(get_bin_dir(), "train_negatives.array_record"),
+            os.path.join(get_bin_dir(), "val_negatives.array_record"),
+            os.path.join(get_bin_dir(), "test_negatives.array_record"),
+            os.path.join(get_bin_dir(), "train_val_negatives.array_record"),
+            os.path.join(get_bin_dir(), "train_val_test_negatives.array_record"),
+            ],
+            [inter_train_df, inter_val_df, inter_test_df, inter_train_val_df, inter_train_val_test_df,
+            ]):
+            data_to_write = df.select(["user_id", "negatives",])
             writer = None
             try:
                 writer = array_record_module.ArrayRecordWriter(outfile, 'group_size:1')
@@ -211,8 +307,13 @@ class TestRetrieval(unittest.TestCase):
                     writer.close()
                     
         #assert can read the filtes
-        for outfile in [os.path.join(get_bin_dir(), "train_negatives.array_record"),
-            os.path.join(get_bin_dir(), "val_negatives.array_record")]:
+        for outfile in [
+            os.path.join(get_bin_dir(), "train_negatives.array_record"),
+            os.path.join(get_bin_dir(), "val_negatives.array_record"),
+            os.path.join(get_bin_dir(), "test_negatives.array_record"),
+            os.path.join(get_bin_dir(), "train_val_negatives.array_record"),
+            os.path.join(get_bin_dir(), "train_val_test_negatives.array_record")
+        ]:
             reader = None
             try:
                 reader = array_record_module.ArrayRecordReader(outfile)
@@ -231,8 +332,123 @@ class TestRetrieval(unittest.TestCase):
             finally:
                 if reader is not None:
                     reader.close()
+    
+    def test_write_recommendations_and_timestamps(self):
+        """
+        1) create recommended movies for each user, but do not subtract watched from them.
+        2) load the train, val, test histories
+        3) for each recommendation, store an array of timestamps
+        with default timestamp of 2050 for all movies,
+        unless the movies is in train, val, or test in which case it gets that timestamp.
         
+        writes those recommednations and timestamps to 2 array_record files
+        """
+        rr = self._construct_Retrieval_using_train_val(max_k=3883)
+        self.assertTrue(rr.max_hist > 200)
         
+        # first timestamp from test is 978133414
+        ts = 978133414
+        n_users = len(rr.user_data.gender)
+        user_inp_dict = {
+            'user_id': tf.constant([[i] for i in range(1, n_users + 1)],
+                dtype=tf.int64),
+            'gender': rr.user_data.gender[:, tf.newaxis],
+            'age': rr.user_data.age[:, tf.newaxis],
+            'occupation': rr.user_data.occupation[:, tf.newaxis],
+            'timestamp': tf.constant([[ts] for _ in range(n_users)],
+                dtype=tf.int64),
+        }
+        n_movies = rr.movie_data.num_movies
+        top_k = rr.max_hist + 200 #n_movies #we want top_k=200, but need space for max history removal
+        
+        # (1)  np.ndarray:
+        recommended_movies = rr.get_movies_given_users(user_inp_dict,
+            top_k=top_k, rm_hist=False)
+        self.assertTrue(recommended_movies.shape == (n_users, top_k))
+        
+        ts_2050 = 2524608000
+        
+        '''
+        for each user, for each recommended movie, there is either a timestamp from train, val, or test
+           else ts_2050 is used
+        '''
+        
+        #key  user_id, value=dict with key=movie_id, value=timestamp
+        history_dict = self._read_all_ratings_into_dict()
+        
+        # write the full recommenations w/o removal to array_record and assert can read it
+        # write to array_records
+        outfile = os.path.join(get_bin_dir(), "recommended_movies.array_record")
+        outfile2 = os.path.join(get_bin_dir(), "recommended_movies_timestamps.array_record")
+        writer = None
+        writer2 = None
+        try:
+            writer = array_record_module.ArrayRecordWriter(outfile, 'group_size:1')
+            writer2 = array_record_module.ArrayRecordWriter(outfile2, 'group_size:1')
+            for user_id, movie_ids in zip(user_inp_dict['user_id'].numpy(), recommended_movies):
+                user_id = user_id[0].item()
+                movie_ids = movie_ids.tolist()
+                self.assertEqual(top_k, len(movie_ids))
+                writer.write(msgpack.packb((user_id, movie_ids)))
+                #create the timestamps
+                timestamps = []
+                for movie_id in movie_ids:
+                    if user_id in history_dict and movie_id in history_dict[user_id]:
+                        timestamps.append(history_dict[user_id][movie_id])
+                    else:
+                        timestamps.append(ts_2050)
+                writer2.write(msgpack.packb((user_id, timestamps)))
+        finally:
+            if writer is not None:
+                writer.close()
+            if writer2 is not None:
+                writer2.close()
+        
+        # assert can read file
+        reader = None
+        try:
+            reader = array_record_module.ArrayRecordReader(outfile)
+            count = reader.num_records()
+            batch_bytes = reader.read([x for x in range(0, count)])
+            records = [msgpack.unpackb(b, use_list=False) for b in batch_bytes]
+            
+            self.assertTrue(count == len(records))
+            self.assertTrue(count == len(recommended_movies))
+            for i, record in enumerate(records):
+                self.assertTrue(isinstance(record[0], int))
+                self.assertTrue(isinstance(record[1], tuple))
+                self.assertTrue(isinstance(record[1][0], int))
+                self.assertEqual(user_inp_dict['user_id'][i].numpy().item(),
+                    record[0])
+                self.assertEqual(recommended_movies[i][0].item(), record[1][0])
+                if i > 5:
+                    break
+        finally:
+            if reader is not None:
+                reader.close()
+                
+        # assert can read file
+        reader = None
+        try:
+            reader = array_record_module.ArrayRecordReader(outfile2)
+            count = reader.num_records()
+            batch_bytes = reader.read([x for x in range(0, count)])
+            records = [msgpack.unpackb(b, use_list=False) for b in  batch_bytes]
+            
+            self.assertTrue(count == len(records))
+            self.assertTrue(count == len(recommended_movies))
+            for i, record in enumerate(records):
+                self.assertTrue(isinstance(record[0], int))
+                self.assertTrue(isinstance(record[1], tuple))
+                self.assertTrue(isinstance(record[1][0], int))
+                if i > 5:
+                    break
+        finally:
+            if reader is not None:
+                reader.close()
+        # =======
+        
+    
     def _read_ratings_array_record(self, file_path:str, batch_size:int=2048) -> pl.DataFrame:
         if not os.path.exists(file_path):
             raise Exception(f'file not found: {file_path}')
@@ -257,3 +473,32 @@ class TestRetrieval(unittest.TestCase):
     
     if __name__ == '__main__':
         unittest.main()
+    
+    def _read_all_ratings_into_dict(self):
+        """
+        create dictionary of user_id : {movie_id: timestamp}
+        :return:
+        """
+        output = {}
+        for file_path in [os.path.join(get_project_dir(),
+            "src/test/resources/data/ratings_train/ratings_train.array_record"),
+            os.path.join(get_project_dir(),
+                "src/test/resources/data/ratings_val/ratings_val.array_record"),
+            os.path.join(get_project_dir(),
+                "src/test/resources/data/ratings_test/ratings_test.array_record")
+            ]:
+            reader = None
+            try:
+                reader = array_record_module.ArrayRecordReader(file_path)
+                n = reader.num_records()
+                batch_bytes = reader.read([x for x in range(n)])  # a single list of encodings, each being a list of 4 integers
+                data = [msgpack.unpackb(b, use_list=False) for b in batch_bytes]  # list of tuples of 4 integers
+                for record in data:
+                    user_id = record[0]
+                    if user_id not in output:
+                        output[user_id] = {}
+                    output[user_id][record[1]] = record[3]
+            finally:
+                if reader is not None:
+                    reader.close()
+        return output

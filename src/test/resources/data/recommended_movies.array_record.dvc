@@ -1,0 +1,5 @@
+outs:
+- md5: 927c0528f3c2e31897098d7d81737a44
+  size: 28704768
+  hash: md5
+  path: recommended_movies.array_record

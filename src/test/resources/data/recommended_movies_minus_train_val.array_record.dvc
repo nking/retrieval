@@ -1,0 +1,5 @@
+outs:
+- md5: 49f4daabc4601eaa8d98cf504b0aa55b
+  size: 23986176
+  hash: md5
+  path: recommended_movies_minus_train_val.array_record

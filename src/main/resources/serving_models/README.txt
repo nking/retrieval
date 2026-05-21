@@ -38,11 +38,33 @@ directory.
 
 val metrics from the pipeline:
 <metric>          value     random (for comparison)
-ndcg@20           0.047       0.005
-mrr@20            0.046       0.0035
-recall@20         0.051       0.02
+ndcg@20           0.049       0.005
+mrr@20            0.048       0.0035
+recall@20         0.055       0.02
 
 hyper-parameters:
+        "learning_rate": 0.00010260217616970745,
+        "weight_decay": 0.00016785171923416138,
+        "regl2": 0.0,
+        "drop_rate": 0.1175417396617746,
+        "embed_out_dim": 32,
+        "layer_sizes": "[16]",
+        "feature_acronym": "ahosy",
+        "incl_genres": true,
+        "BATCH_SIZE": 2048,
+        "NUM_EPOCHS": 40,
+        "use_bias_corr": true,
+        "bias_corr_alpha": 0.01,
+        "temperature": 0.1,
+        "n_users": 6040,
+        "n_movies": 3883,
+        "n_genres": 18,
+        "run_eagerly": false,
+        "device": "CPU",
+        "num_train": 370838,
+        "num_eval": 46354,
+        "version": "1.0.0",
+        "model_name": "user_movie",
 
 =========================================================
 The metadata model with batch_size 32 has RMSE 0.25

@@ -1,0 +1,23 @@
+metrics:
+   calculated using src/test/python/calc_metrics.py
+   method test_calc_metrics_full_catalog
+
+   for the full catalog:
+
+    'ndcg_20': 0.03560482977811995
+    'mrr_20': 0.10561722874185737,
+    'recall_20': 0.019178402777499638,
+    'hit_rate_20': 0.37542087542087543,
+
+   Compare to the validation metrics calculated in the
+   project that created the model and embeddings:
+        https://raw.githubusercontent.com/nking/recommender_systems/refs/heads/main/docs/mlops/model_analysis.txt
+      Best fitting model used a batch size of 2056:
+        val ndcg@20 = 0.049
+        val mrr@20 = 0.048
+        val recall@20 = 0.055
+
+        The ndcg@20 is 10 times random performance.
+        The mrr@20 is > 10 times random performance.
+        The recall@20 is 2.5 times random performance.
+

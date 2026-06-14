@@ -121,218 +121,31 @@ class TestRetrieval(unittest.TestCase):
             if reader is not None:
                 reader.close()
         
-    def test_write_negatives(self):
+    def _test_write_negatives(self):
         """
-        1) create recommended movies for each user, but do not subtract watched from them.
-        2) load the train and val movies disliked by user
-        3) find the intersection of (1) and (2) and  as negatives file
-        4) append to 3, any items from (2) that aren't already in (3)
-        writes those negatives to array_record format file
-        """
+        The types of negatives needed for listwise contrastive learning are listed and an example is
+        given for 1 user.
         
-        rr = self._construct_Retrieval_using_train_val(max_k=3883)
-        self.assertTrue(rr.max_hist > 200)
+        Here is example for 1 user's data:
+            watched history = A,B,C,D,G
+            disliked = A,B,C,D
+            recommended by retrieval = B,D,F,G,H
+            entire movie catalog is A,B,C,D,E,F,G,H,I,J
         
-        # first timestamp from test is 978133414
-        ts = 978133414
-        n_users = len(rr.user_data.gender)
-        user_inp_dict = {
-            'user_id': tf.constant([[i] for i in range(1, n_users + 1)],
-                dtype=tf.int64),
-            'gender': rr.user_data.gender[:, tf.newaxis],
-            'age': rr.user_data.age[:, tf.newaxis],
-            'occupation': rr.user_data.occupation[:, tf.newaxis],
-            'timestamp': tf.constant([[ts] for _ in range(n_users)],
-                dtype=tf.int64),
-        }
-        n_movies = rr.movie_data.num_movies
-        top_k = n_movies
-        
-        #(1)  np.ndarray:
-        recommended_movies = rr.get_movies_given_users(user_inp_dict, top_k=top_k, rm_hist=False)
-        self.assertTrue(recommended_movies.shape == (n_users, top_k))
-      
-        #put into polars dataframe
-        rec_df = pl.DataFrame(
-            [(u[0], r) for u, r in zip(user_inp_dict['user_id'].numpy(), recommended_movies)],
-            schema={
-                "user_id": pl.Int64,
-                "recommended": pl.List(pl.Int64)
-            },
-            orient="row"
-        )
-        print(f'rec_df={rec_df}', flush=True)
-        
-        #(2) read the disliked from train and val, separately
-        ratings_train_disliked_df = self._read_ratings_array_record(
-            os.path.join(get_project_dir(),
-                "src/test/resources/data/ratings_train_disliked/ratings_train_disliked.array_record")
-        )
-        ratings_train_disliked_df=ratings_train_disliked_df.drop("timestamp")
-        ratings_val_disliked_df = self._read_ratings_array_record(
-            os.path.join(get_project_dir(),
-                "src/test/resources/data/ratings_val_disliked/ratings_val_disliked.array_record")
-        )
-        ratings_val_disliked_df=ratings_val_disliked_df.drop("timestamp")
-        ratings_test_disliked_df = self._read_ratings_array_record(
-            os.path.join(get_project_dir(),
-                "src/test/resources/data/ratings_test_disliked/ratings_test_disliked.array_record")
-        )
-        ratings_test_disliked_df= ratings_test_disliked_df.drop("timestamp")
-        ratings_train_val_disliked_df = pl.concat([ratings_train_disliked_df,ratings_val_disliked_df],
-            how="vertical", rechunk=True)
-        ratings_train_val_test_disliked_df = pl.concat([ratings_train_val_disliked_df, ratings_test_disliked_df],
-            how="vertical", rechunk=True)
-        
-        ratings_train_disliked_df = ratings_train_disliked_df.group_by(
-            'user_id').agg(
-            [pl.col("movie_id").sort_by("rating", descending=True)])
-        ratings_val_disliked_df = ratings_val_disliked_df.group_by(
-            'user_id').agg(
-            [pl.col("movie_id").sort_by("rating", descending=True)])
-        ratings_test_disliked_df = ratings_test_disliked_df.group_by(
-            'user_id').agg(
-            [pl.col("movie_id").sort_by("rating", descending=True)])
-        ratings_train_val_disliked_df = ratings_train_val_disliked_df.group_by(
-            'user_id').agg(
-            [pl.col("movie_id").sort_by("rating", descending=True)])
-        ratings_train_val_test_disliked_df = ratings_train_val_test_disliked_df.group_by(
-            'user_id').agg(
-            [pl.col("movie_id").sort_by("rating", descending=True)])
-        
-        #intersection of train disliked with rec_df
-        inter_train_df = ratings_train_disliked_df.join(rec_df, on='user_id', how='left')
-        inter_train_df = inter_train_df.with_columns(
-            hard_neg=pl.col("movie_id").list.set_intersection(pl.col("recommended"))
-        )
-        inter_train_df = inter_train_df.with_columns(
-            easy_neg=pl.col("movie_id").list.set_difference(pl.col("hard_neg"))
-        )
-       
-        #intersection of val disliked with rec_df
-        inter_val_df = ratings_val_disliked_df.join(rec_df, on='user_id', how='left')
-        inter_val_df = inter_val_df.with_columns(
-            hard_neg = pl.col("movie_id").list.set_intersection(pl.col("recommended"))
-        )
-        inter_val_df = inter_val_df.with_columns(
-            easy_neg = pl.col("movie_id").list.set_difference(pl.col("hard_neg"))
-        )
-        
-        # intersection of test disliked with rec_df
-        inter_test_df = ratings_test_disliked_df.join(rec_df, on='user_id',
-            how='left')
-        inter_test_df = inter_test_df.with_columns(
-            hard_neg=pl.col("movie_id").list.set_intersection(pl.col("recommended"))
-        )
-        inter_test_df = inter_test_df.with_columns(
-            easy_neg=pl.col("movie_id").list.set_difference(pl.col("hard_neg"))
-        )
-        
-        inter_train_val_df = ratings_train_val_disliked_df.join(rec_df, on='user_id', how='left')
-        inter_train_val_df = inter_train_val_df.with_columns(
-            hard_neg=pl.col("movie_id").list.set_intersection(pl.col("recommended"))
-        )
-        inter_train_val_df = inter_train_val_df.with_columns(
-            easy_neg=pl.col("movie_id").list.set_difference(pl.col("hard_neg"))
-        )
-        
-        inter_train_val_test_df = ratings_train_val_test_disliked_df.join(rec_df,
-            on='user_id',
-            how='left')
-        inter_train_val_test_df = inter_train_val_test_df.with_columns(
-            hard_neg=pl.col("movie_id").list.set_intersection(pl.col("recommended"))
-        )
-        inter_train_val_test_df = inter_train_val_test_df.with_columns(
-            easy_neg=pl.col("movie_id").list.set_difference(pl.col("hard_neg"))
-        )
-        
+        1) "hard negatives" = recommended intersection with user's disliked.
+            These are "False positives".
+            intersect({B,D,F,G,H}, {A,B,C,D}) = B,D
+        2) "implicit hard negatives" = recommended minus users watch history
+            subtract({B,D,F,G,H}, {A,B,C,D,G}) = F,H
+        3) "out of distr negatives" = disliked - recommended.
+            subtract({A,B,C,D}, {B,D,F,G,H}) = A,C
+        4) "easy negatives" = movie catalog - watch history
+            subtract({A,B,C,D,E,F,G,H,I,J}, {A,B,C,D,G}) = E,F,H,I,J
 
-        inter_train_df = inter_train_df.with_columns(
-            negatives=pl.col("hard_neg").list.concat(pl.col("easy_neg"))
-        )
-        inter_val_df = inter_val_df.with_columns(
-            negatives=pl.col("hard_neg").list.concat(pl.col("easy_neg"))
-        )
-        inter_test_df = inter_test_df.with_columns(
-            negatives=pl.col("hard_neg").list.concat(pl.col("easy_neg"))
-        )
-        inter_train_val_df = inter_train_val_df.with_columns(
-            negatives=pl.col("hard_neg").list.concat(pl.col("easy_neg"))
-        )
-        inter_train_val_test_df = inter_train_val_test_df.with_columns(
-            negatives=pl.col("hard_neg").list.concat(pl.col("easy_neg"))
-        )
-        
-        print(
-            f'train min_negatives_length={inter_train_df.select(pl.col("negatives").list.len().min()).item()}')  # 635
-        print(
-            f'train max_negatives_length={inter_train_df.select(pl.col("negatives").list.len().max()).item()}')  # 635
-        print(
-            f'val min_negatives_length={inter_val_df.select(pl.col("negatives").list.len().min()).item()}')  # 635
-        print(
-            f'val max_negatives_length={inter_val_df.select(pl.col("negatives").list.len().max()).item()}')  # 635
-        print(
-            f'test min_negatives_length={inter_test_df.select(pl.col("negatives").list.len().min()).item()}')  # 635
-        print(
-            f'test max_negatives_length={inter_test_df.select(pl.col("negatives").list.len().max()).item()}')  # 635
-        
-        print(
-            f'train+val min_negatives_length={inter_train_val_df.select(pl.col("negatives").list.len().min()).item()}')  # 635
-        print(
-            f'train+val max_negatives_length={inter_train_val_df.select(pl.col("negatives").list.len().max()).item()}')  # 635
-        print(
-            f'train+val+test min_negatives_length={inter_train_val_test_df.select(pl.col("negatives").list.len().min()).item()}')  # 635
-        print(
-            f'train+val+test max_negatives_length={inter_train_val_test_df.select(pl.col("negatives").list.len().max()).item()}')  # 635
-        
-        #write user_id, negatives to array_record
-        for outfile, df in zip(
-            [os.path.join(get_bin_dir(), "train_negatives.array_record"),
-            os.path.join(get_bin_dir(), "val_negatives.array_record"),
-            os.path.join(get_bin_dir(), "test_negatives.array_record"),
-            os.path.join(get_bin_dir(), "train_val_negatives.array_record"),
-            os.path.join(get_bin_dir(), "train_val_test_negatives.array_record"),
-            ],
-            [inter_train_df, inter_val_df, inter_test_df, inter_train_val_df, inter_train_val_test_df,
-            ]):
-            data_to_write = df.select(["user_id", "negatives",])
-            writer = None
-            try:
-                writer = array_record_module.ArrayRecordWriter(outfile, 'group_size:1')
-                for row in data_to_write.iter_rows(named=False):
-                    serialized_bytes = msgpack.packb(row, use_bin_type=True)
-                    writer.write(serialized_bytes)
-            finally:
-                if writer is not None:
-                    writer.close()
-                    
-        #assert can read the filtes
-        for outfile in [
-            os.path.join(get_bin_dir(), "train_negatives.array_record"),
-            os.path.join(get_bin_dir(), "val_negatives.array_record"),
-            os.path.join(get_bin_dir(), "test_negatives.array_record"),
-            os.path.join(get_bin_dir(), "train_val_negatives.array_record"),
-            os.path.join(get_bin_dir(), "train_val_test_negatives.array_record")
-        ]:
-            reader = None
-            try:
-                reader = array_record_module.ArrayRecordReader(outfile)
-                count = reader.num_records()
-                print(f'reading {count} records from {outfile}')
-                batch_bytes = reader.read([x for x in range(0, count)])
-                records = [msgpack.unpackb(b, use_list=False) for b in batch_bytes]
-                
-                self.assertTrue(count == len(records))
-                for i, record in enumerate(records):
-                    self.assertTrue(isinstance(record[0], int))
-                    self.assertTrue(isinstance(record[1], tuple))
-                    self.assertTrue(isinstance(record[1][0], int))
-                    if i > 5:
-                        break
-            finally:
-                if reader is not None:
-                    reader.close()
-    
+        Because downstream models in the system have to use watch_history and diskliked with timestamps < target timestamps,
+        the fixed lists are not written here anymore.
+        """
+
     def test_write_recommendations_and_timestamps(self):
         """
         1) create recommended movies for each user, but do not subtract watched from them.

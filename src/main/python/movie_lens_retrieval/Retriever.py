@@ -85,7 +85,8 @@ class Retriever:
         :param max_k: the maximum number of embeddings to return from a 
         ScANN embedding search.  This should be higher
         than the top_k desired to account for later removing movies already seen.  
-        The default is 1000.
+        The default is 1000.  This should not exceed the maximum number of movies in the catalog
+        which is 3883 for the test dataset used in this project.
         
         :param embed_dim: the dimensionality of the embeddings
         """

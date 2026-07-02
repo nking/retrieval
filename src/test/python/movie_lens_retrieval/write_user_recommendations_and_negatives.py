@@ -4,6 +4,8 @@ from typing import Dict
 import numpy as np
 from array_record.python import array_record_module
 import msgpack
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from helper import *
 from movie_lens_retrieval.Retriever import Retriever, EmbeddingType
@@ -154,9 +156,10 @@ class TestRetrieval(unittest.TestCase):
         with default timestamp of 2050 for all movies,
         unless the movies is in train, val, or test in which case it gets that timestamp.
         
-        writes those recommednations and timestamps to 2 array_record files
+        writes those recommednations and timestamps to 2 array_record files  and to 2 parquet files
         """
-        rr = self._construct_Retrieval_using_train_val(max_k=3883)
+        num_movies = 3883
+        rr = self._construct_Retrieval_using_train_val(max_k=num_movies)
         self.assertTrue(rr.max_hist > 200)
         
         # first timestamp from test is 978133414
@@ -171,8 +174,7 @@ class TestRetrieval(unittest.TestCase):
             'timestamp': tf.constant([[ts] for _ in range(n_users)],
                 dtype=tf.int64),
         }
-        n_movies = rr.movie_data.num_movies
-        top_k = rr.max_hist + 200 #n_movies #we want top_k=200, but need space for max history removal
+        top_k = num_movies
         
         # (1)  np.ndarray:
         recommended_movies = rr.get_movies_given_users(user_inp_dict,
@@ -189,20 +191,46 @@ class TestRetrieval(unittest.TestCase):
         #key  user_id, value=dict with key=movie_id, value=timestamp
         history_dict = self._read_all_ratings_into_dict()
         
+        movies_schema = pa.schema([
+            pa.field("user_id", pa.int32()),
+            pa.field("movie_ids", pa.list_(pa.int32(), num_movies))
+        ])
+        
+        ts_schema = pa.schema([
+            pa.field("user_id", pa.int32()),
+            pa.field("timestamps", pa.list_(pa.int64(), num_movies))
+        ])
+        
         # write the full recommenations w/o removal to array_record and assert can read it
         # write to array_records
         outfile = os.path.join(get_bin_dir(), "recommended_movies.array_record")
         outfile2 = os.path.join(get_bin_dir(), "recommended_movies_timestamps.array_record")
+        pa_outfile = os.path.join(get_bin_dir(), "recommended_movies.parquet")
+        pa_outfile2 = os.path.join(get_bin_dir(), "recommended_movies_timestamps.parquet")
         writer = None
         writer2 = None
+        pa_movie_writer = None
+        pa_timestamp_writer = None
         try:
             writer = array_record_module.ArrayRecordWriter(outfile, 'group_size:1')
             writer2 = array_record_module.ArrayRecordWriter(outfile2, 'group_size:1')
+            
+            pa_movie_writer = pq.ParquetWriter(pa_outfile, movies_schema)
+            pa_timestamp_writer = pq.ParquetWriter(pa_outfile2, ts_schema)
+            
             for user_id, movie_ids in zip(user_inp_dict['user_id'].numpy(), recommended_movies):
                 user_id = user_id[0].item()
                 movie_ids = movie_ids.tolist()
                 self.assertEqual(top_k, len(movie_ids))
                 writer.write(msgpack.packb((user_id, movie_ids)))
+                
+                movie_batch = pa.RecordBatch.from_arrays([
+                    pa.array([user_id], type=pa.int32()),
+                    pa.array([movie_ids], type=pa.list_(pa.int32(), num_movies))
+                ], schema=movies_schema)
+                pa_movie_writer.write_batch(movie_batch)
+                
+                
                 #create the timestamps
                 timestamps = []
                 for movie_id in movie_ids:
@@ -211,11 +239,22 @@ class TestRetrieval(unittest.TestCase):
                     else:
                         timestamps.append(ts_2050)
                 writer2.write(msgpack.packb((user_id, timestamps)))
+                
+                ts_batch = pa.RecordBatch.from_arrays([
+                    pa.array([user_id], type=pa.int32()),
+                    pa.array([timestamps], type=pa.list_(pa.int64(), num_movies))
+                ], schema=ts_schema)
+                pa_timestamp_writer.write_batch(ts_batch)
+                
         finally:
             if writer is not None:
                 writer.close()
             if writer2 is not None:
                 writer2.close()
+            if pa_movie_writer is not None:
+                pa_movie_writer.close()
+            if pa_timestamp_writer is not None:
+                pa_timestamp_writer.close()
         
         # assert can read file
         reader = None

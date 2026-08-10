@@ -20,7 +20,6 @@ class TestRetrieval(unittest.TestCase):
         
         self.cold_start_path = os.path.join(get_project_dir(), "src/test/resources/data/cold_start_movies.txt")
         
-        self.embed_dim = 16 #though this could be read and parsed from a single entry in embeddings
         self.movie_emb = os.path.join(get_project_dir(),
             "src/test/resources/data/movie_emb_inp/*tfrecord*.gz")
         self.user_emb = os.path.join(get_project_dir(),
@@ -49,7 +48,6 @@ class TestRetrieval(unittest.TestCase):
             movie_id_offset = self.MOVIE_OFFSET,
             user_embed_path=self.user_emb,
             movie_embed_path=self.movie_emb,
-            embed_dim=self.embed_dim,
             cold_start_movie_path=self.cold_start_path,
             users_path=self.users_path,
             movies_path=self.movies_path,
@@ -63,7 +61,6 @@ class TestRetrieval(unittest.TestCase):
                 user_embed_path: str,
                 movie_embed_path: str,
                 max_k: int = 1000,
-                embed_dim: int = 16
         ):
         :return:
         '''

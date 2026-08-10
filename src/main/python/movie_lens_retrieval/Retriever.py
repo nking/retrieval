@@ -1,3 +1,4 @@
+import json
 from typing import Union, List, Dict, Tuple, Set
 
 import numpy as np
@@ -60,7 +61,6 @@ class Retriever:
             movie_id_offset:int,
             user_embed_path: str,
             movie_embed_path: str,
-            embed_dim: int,
             cold_start_movie_path: str,
             users_path: str,
             movies_path: str,
@@ -77,10 +77,13 @@ class Retriever:
         :param users_path: path to the TFRecords of all users. has columns movie_id, age, gender, occupation,
 
         :param user_embed_path: path to TFRecords of all user embeddings made
-           from latest trained Query model.
+           from latest trained Query model.  Note that in the parent directory for this
+           embedding, a file called emb_metadata.json is expected to exit.
 
         :param movie_embed_path: path to TFRecords of all movie embeddings made
            from latest trained Candidate model.
+           Note that in the parent directory for this
+           embedding, a file called emb_metadata.json is expected to exit
 
         :param max_k: the maximum number of embeddings to return from a 
         ScANN embedding search.  This should be higher
@@ -101,26 +104,34 @@ class Retriever:
         
         self.loaded_user_movie_model = tf.saved_model.load(user_movie_saved_model_dir)
         
-        self.embed_dim = embed_dim
+        self.user_indexers, self.user_indexers_ids, embed_dim = Retriever._create_user_indexer(
+            user_embed_path, self.max_k)
         
-        self.user_indexers, self.user_indexers_ids = Retriever._create_user_indexer(
-            user_embed_path, self.max_k, self.embed_dim)
+        self.movie_indexers, self.movie_indexers_ids, _ = Retriever._create_movie_indexer(
+            movie_embed_path, self.max_k)
         
-        self.movie_indexers, self.movie_indexers_ids = Retriever._create_movie_indexer(
-            movie_embed_path, self.max_k, self.embed_dim)
+        self.embed_dim =embed_dim
         
         self.user_history_dict, self.max_hist = Retriever._read_user_ratings_histories(
             user_movie_hist_path_patterns)
     
     @staticmethod
     def _create_indexer_and_tables(embedding_type: EmbeddingType,
-            embed_file_path: str, max_k: int, embed_dim: int = 16) -> Tuple[scann.scann_ops_pybind.ScannSearcher, tf.Tensor]:
+            embed_file_path: str, max_k: int) -> Tuple[scann.scann_ops_pybind.ScannSearcher, tf.Tensor, int]:
         
         # read tfrecords
         _ct = "GZIP" if embed_file_path.endswith(".gz") else None
         file_paths = glob.glob(embed_file_path)
         if len(file_paths) == 0:
             raise FileNotFoundError(embed_file_path)
+        
+        #read the associated metadata file
+        metadata_path = Retriever.get_parent_directory(file_paths[0])
+        metadata_path = f"{metadata_path}/emb_metadata.json"
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        embed_dim = metadata['embed_dim']
+        #num_records = metadata['num_records']
         
         embed_ds_ser = tf.data.TFRecordDataset(file_paths, compression_type=_ct)
         
@@ -139,22 +150,21 @@ class Retriever:
         indexer = Retriever.build_scann_searcher(embeddings=embeddings,
             top_k=max_k)
         
-        return indexer, ids
+        return indexer, ids, embed_dim
     
     @staticmethod
-    def _create_movie_indexer(movie_embed_path: str, max_k: int,
-            embed_dim: int = 16) -> Tuple[
-        scann.scann_ops_pybind.ScannSearcher, tf.Tensor]:
+    def _create_movie_indexer(movie_embed_path: str, max_k: int) -> Tuple[
+        scann.scann_ops_pybind.ScannSearcher, tf.Tensor, int]:
         
         return Retriever._create_indexer_and_tables(EmbeddingType.MOVIE,
-            movie_embed_path, max_k, embed_dim)
+            movie_embed_path, max_k)
     
     @staticmethod
-    def _create_user_indexer(user_embed_path: str, max_k: int,
-            embed_dim: int = 16) -> Tuple[scann.scann_ops_pybind.ScannSearcher, tf.Tensor]:
+    def _create_user_indexer(user_embed_path: str, max_k: int)\
+            -> Tuple[scann.scann_ops_pybind.ScannSearcher, tf.Tensor, int]:
         
         return Retriever._create_indexer_and_tables(EmbeddingType.USER,
-            user_embed_path, max_k, embed_dim)
+            user_embed_path, max_k)
     
     @staticmethod
     def _parse_emb_tfrecord_ser_into_lists(ds_ser: tf.data.TFRecordDataset,
@@ -572,6 +582,22 @@ class Retriever:
             # f is an iterator; this is highly optimized in CPython
             numbers = [int(line) for line in f]
         return numbers
+    
+    @staticmethod
+    def get_parent_directory(uri_or_path: str) -> str:
+        """
+        Extracts the parent directory from a given file URI or path.
+        Supports gs://, s3://, absolute, and relative paths.
+        """
+        # Normalize backslashes to forward slashes for uniform parsing, and strip trailing slashes
+        normalized = uri_or_path.replace('\\', '/').rstrip('/')
+        
+        # If there's no slash, it's just a filename in the current directory
+        if '/' not in normalized:
+            return '.'
+        
+        parent_dir, _ = normalized.rsplit('/', 1)
+        return parent_dir
     
     @staticmethod
     def _read_user_ratings_histories(path_patterns: List[str], batch_size:int=2048) -> Tuple[defaultdict, int]:

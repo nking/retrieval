@@ -16,7 +16,7 @@ dependencies = [
   'scann; platform_system == "Linux"',
   'tensorflow>=2.20.0', 'numpy >= 2.0',
   'array-record=0.8.3', 'msgpack==1.1.2', 'msgpack-numpy==0.4.8',
-  'polars>=1.35.2'
+  'polars>=1.35.2', 'umap_learn==0.5.12', 'seaborn==0.13.2'
 ]
 readme = "README.md"
 license = "MIT"

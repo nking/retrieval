@@ -94,10 +94,10 @@ class PlotEmbeddingsClusters(unittest.TestCase):
         
         df_train_ratings = self._read_ratings_array_record(
             os.path.join(get_project_dir(),
-                'src/test/resources/data/ratings_train_liked/ratings_train_liked.array_record'))
+                'src/test/resources/data/ratings_train_liked.array_record'))
         df_val_ratings = self._read_ratings_array_record(
             os.path.join(get_project_dir(),
-                'src/test/resources/data/ratings_val_liked/ratings_val_liked.array_record'))
+                'src/test/resources/data/ratings_val_liked.array_record'))
         
         unique_movie_ids = (
             df_train_ratings.select("movie_id").unique().get_column("movie_id")

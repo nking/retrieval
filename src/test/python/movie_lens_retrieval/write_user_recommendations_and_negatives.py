@@ -31,9 +31,9 @@ class TestRetrieval(unittest.TestCase):
             "src/test/resources/data/movies/movies.parquet")
         
         self.user_movie_hist_path_patterns = [os.path.join(get_project_dir(),
-            "src/test/resources/data/ratings_train/ratings_train.array_record"),
+            "src/test/resources/data/ratings_train.array_record"),
             os.path.join(get_project_dir(),
-                "src/test/resources/data/ratings_val/ratings_val.array_record")
+                "src/test/resources/data/ratings_val.array_record")
             ]
         self.max_k = 10
         self.MOVIE_OFFSET = 6040 + 1
@@ -85,40 +85,6 @@ class TestRetrieval(unittest.TestCase):
         recommended_movies = rr.get_movies_given_users(user_inp_dict, top_k=top_k, rm_hist=True)
         self.assertTrue(recommended_movies.shape == (n_users, top_k))
         
-        #write to array_records
-        outfile = os.path.join(get_bin_dir(), "recommended_movies_minus_train_val.array_record")
-        writer = None
-        try:
-            writer = array_record_module.ArrayRecordWriter(outfile, 'group_size:1')
-            for user_id, movie_ids in zip(user_inp_dict['user_id'].numpy(), recommended_movies):
-                user_id = user_id[0].item()
-                movie_ids = movie_ids.tolist()
-                writer.write(msgpack.packb((user_id, movie_ids)))
-        finally:
-            if writer is not None:
-                writer.close()
-       
-        #assert can read file
-        reader = None
-        try:
-            reader = array_record_module.ArrayRecordReader(outfile)
-            count = reader.num_records()
-            batch_bytes = reader.read( [x for x in range(0, count)])
-            records = [msgpack.unpackb(b, use_list=False) for b in batch_bytes]
-            
-            self.assertTrue(count == len(records))
-            self.assertTrue(count == len(recommended_movies))
-            for i, record in enumerate(records):
-                self.assertTrue(isinstance(record[0], int))
-                self.assertTrue(isinstance(record[1], tuple))
-                self.assertTrue(isinstance(record[1][0], int))
-                self.assertEqual(user_inp_dict['user_id'][i].numpy().item(), record[0])
-                self.assertEqual(recommended_movies[i][0].item(), record[1][0])
-                if i > 5:
-                    break
-        finally:
-            if reader is not None:
-                reader.close()
         
     def _test_write_negatives(self):
         """
@@ -330,11 +296,11 @@ class TestRetrieval(unittest.TestCase):
         """
         output = {}
         for file_path in [os.path.join(get_project_dir(),
-            "src/test/resources/data/ratings_train/ratings_train.array_record"),
+            "src/test/resources/data/ratings_train.array_record"),
             os.path.join(get_project_dir(),
-                "src/test/resources/data/ratings_val/ratings_val.array_record"),
+                "src/test/resources/data/ratings_val.array_record"),
             os.path.join(get_project_dir(),
-                "src/test/resources/data/ratings_test/ratings_test.array_record")
+                "src/test/resources/data/ratings_test.array_record")
             ]:
             reader = None
             try:

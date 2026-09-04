@@ -28,7 +28,8 @@ The model is TwoTowerDNN, a bi-encoder trained with
 an in-batch softmax objective (contrastive, listwise loss)
 and corrected for item sampling bias 
 following Yi et al. 2019 "Sampling-bias-corrected neural modeling
-for large corpus item recommendations".
+for large corpus item recommendations" and separation of ratings
+frequency components.
 
 These metrics are from the pipeline's evaluation on the test
 dataset, and uses in-batch negatives.

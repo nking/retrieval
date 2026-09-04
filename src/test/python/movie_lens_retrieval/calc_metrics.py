@@ -80,9 +80,9 @@ class CalcMetrics(unittest.TestCase):
         self.movies_path = os.path.join(get_project_dir(),
             "src/test/resources/data/movies/movies.parquet")
         
-        self.user_movie_hist_path_patterns = [os.path.join(get_project_dir(), "src/test/resources/data/ratings_train/ratings_train.array_record"),
+        self.user_movie_hist_path_patterns = [os.path.join(get_project_dir(), "src/test/resources/data/ratings_train.array_record"),
             os.path.join(get_project_dir(),
-                "src/test/resources/data/ratings_val/ratings_val.array_record")
+                "src/test/resources/data/ratings_val.array_record")
             ]
         self.n_movies = 3883
         self.MOVIE_OFFSET = 6040 + 1
@@ -150,9 +150,9 @@ class CalcMetrics(unittest.TestCase):
    
     def _read_train_val_combined(self) -> pl.DataFrame:
         df_train_ratings = self._read_ratings_array_record(os.path.join(get_project_dir(),
-            'src/test/resources/data/ratings_train/ratings_train.array_record'))
+            'src/test/resources/data/ratings_train.array_record'))
         df_val_ratings = self._read_ratings_array_record(os.path.join(get_project_dir(),
-            'src/test/resources/data/ratings_val/ratings_val.array_record'))
+            'src/test/resources/data/ratings_val.array_record'))
         return pl.concat([df_train_ratings, df_val_ratings])
         
     def test_calc_metrics_full_catalog(self):

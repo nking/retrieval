@@ -105,15 +105,17 @@ class PlotEmbeddingsClusters(unittest.TestCase):
         movie_tiers_filtered = self.emb_df.filter(
             pl.col("movie_id").is_in(unique_movie_ids)
         )
-        self.plot_joined_df(movie_tiers_filtered, outdir, "train_movies")
+        self.plot_embeddings_umap_tsne(movie_tiers_filtered, outdir, "train_movies")
         
         unique_movie_ids = (
             df_val_ratings.select("movie_id").unique().get_column("movie_id")
         )
+        #"embedding", "movie_id", "tier"
         movie_tiers_filtered = self.emb_df.filter(
             pl.col("movie_id").is_in(unique_movie_ids)
         )
-        self.plot_joined_df(movie_tiers_filtered, outdir, "val_movies")
+        
+        self.plot_embeddings_umap_tsne(movie_tiers_filtered, outdir, "val_movies")
         
         #intersection by movie between datasets
         common_ids = (
@@ -125,7 +127,7 @@ class PlotEmbeddingsClusters(unittest.TestCase):
         movie_tiers_filtered = self.emb_df.filter(
             pl.col("movie_id").is_in(common_ids)
         )
-        self.plot_joined_df(movie_tiers_filtered, outdir, "intersect_movies")
+        self.plot_embeddings_umap_tsne(movie_tiers_filtered, outdir, "intersect_movies")
         # a quick look at the counts in train ratings files
         df_filtered = df_train_ratings.filter(
             pl.col("movie_id").is_in(common_ids)
@@ -166,7 +168,7 @@ class PlotEmbeddingsClusters(unittest.TestCase):
             pl.col("movie_id").is_in(common_ids)
         )
         if (movie_tiers_filtered['movie_id'].count() > 0):
-            self.plot_joined_df(movie_tiers_filtered, outdir, "intersect_users_then_movies")
+            self.plot_embeddings_umap_tsne(movie_tiers_filtered, outdir, "intersect_users_then_movies")
         
         # a quick look at the counts
         df_filtered = df1_filtered.join(movie_tiers_filtered, on="movie_id", how="left")
@@ -186,9 +188,9 @@ class PlotEmbeddingsClusters(unittest.TestCase):
         
         # movie_tiers_df has columns "movie_id" and "tier"
         
-        self.plot_joined_df(self.emb_df, outdir, "all_movies")
+        self.plot_embeddings_umap_tsne(self.emb_df, outdir, "all_movies")
         
-    def plot_joined_df(self, joined_df, outdir:str, file_tag:str):
+    def plot_embeddings_umap_tsne(self, joined_df, outdir:str, file_tag:str):
         # Convert to NumPy arrays for UMAP
         X = np.array(joined_df.get_column("embedding").to_list())
         y = joined_df.get_column("tier").to_numpy()

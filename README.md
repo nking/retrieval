@@ -11,6 +11,11 @@ The embeddings were trained by a listwise contrastive
 bi-encoder in the project:
 https://github.com/nking/recommender_systems.git
 
+This project is useful for post-training analysis of the
+TwoTowers bi-encoder models.
+see scripts src/test/python/movie_lens_retrieval/post_training_eda.py
+
+
 instructions:
   set up a virtual environment using conda or virtualenv
   with a python version that is >= 3.10.0

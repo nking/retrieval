@@ -12,8 +12,7 @@ class TestRetrieval(unittest.TestCase):
         
         saved_models_dir = os.path.join(get_project_dir(),
             "src/main/resources/serving_models")
-        self.user_movie_models_dir = os.path.join(saved_models_dir,
-            "user_movie_model")
+        self.user_movie_models_dir = os.path.join(saved_models_dir, "user_movie_model")
         
         self.cold_start_path = os.path.join(get_project_dir(), "src/test/resources/data/cold_start_movies.txt")
         
@@ -27,7 +26,8 @@ class TestRetrieval(unittest.TestCase):
         self.movies_path = os.path.join(get_project_dir(),
             "src/test/resources/data/movies/movies.parquet")
         
-        self.user_movie_hist_path_patterns = [os.path.join(get_project_dir(), "src/test/resources/data/ratings_train.array_record"),
+        self.user_movie_hist_path_patterns = [
+            os.path.join(get_project_dir(), "src/test/resources/data/ratings_train.array_record"),
             os.path.join(get_project_dir(),
                 "src/test/resources/data/ratings_val.array_record")
             ]

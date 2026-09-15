@@ -1,5 +1,8 @@
+from typing import Union
+
 import tensorflow as tf
 import polars as pl
+from numpy import ndarray as ndarray
 
 class MovieData(object):
     def __init__(self, movie_path:str, offset:int=6041):
@@ -23,7 +26,7 @@ class MovieData(object):
     @tf.function(input_signature=[
         tf.TensorSpec(shape=[None, 1], dtype=tf.int64),
     ])
-    def get_movie(self, movie_id: tf.Tensor):
+    def get_movie(self, movie_id: Union[tf.Tensor, ndarray]):
         """
         get a dictionary of inputs usable for the Candidate model dictionary signature.
         
@@ -33,6 +36,9 @@ class MovieData(object):
            is -1, it gets reset to tf.timestamp().
         :return:
         """
+        if len(tf.shape(movie_id)) == 1:
+            movie_id = tf.expand_dims(movie_id, 1)
+            
         idx = tf.subtract(movie_id, self.offset)
         return {
             'movie_id': movie_id,

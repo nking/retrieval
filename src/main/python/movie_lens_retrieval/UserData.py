@@ -1,7 +1,8 @@
-from typing import Dict
+from typing import Dict, Union
 
 import tensorflow as tf
 import polars as pl
+from numpy import ndarray as ndarray
 
 class UserData(object):
     def __init__(self, users_path:str):
@@ -25,7 +26,7 @@ class UserData(object):
         tf.TensorSpec(shape=[None, 1], dtype=tf.int64),
         tf.TensorSpec(shape=[None, 1], dtype=tf.int64)
     ])
-    def get_user(self, user_id: tf.Tensor, timestamp: tf.Tensor) -> Dict[str, tf.Tensor]:
+    def get_user(self, user_id: Union[tf.Tensor, ndarray], timestamp: Union[tf.Tensor, ndarray]) -> Dict[str, tf.Tensor]:
         """
         get a dictionary of inputs usable for the Query model dictionary signature.
         
@@ -37,7 +38,11 @@ class UserData(object):
         """
         #tf.debugging.assert_equal(tf.shape(user_id), tf.shape(timestamp),
         #    message="User ID and Timestamp batches must be the same size")
-        
+        if len(tf.shape(user_id)) == 1:
+            user_id = tf.expand_dims(user_id, 1)
+        if len(tf.shape(timestamp)) == 1:
+            timestamp = tf.expand_dims(timestamp, 1)
+            
         idx = user_id - tf.constant(1, dtype=tf.int64)
         now = tf.cast(tf.timestamp(), tf.int64)
         resolved_ts = tf.where(

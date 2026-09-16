@@ -7,7 +7,7 @@ to python here to have it all in one place
 import json
 import os
 import unittest
-from typing import Any, Dict, Union, Tuple, List
+from typing import Any, Dict, Union, Tuple, List, Optional
 import polars as pl
 import msgpack
 from array_record.python import array_record_module
@@ -22,7 +22,11 @@ import numpy as np
 import json
 from datetime import datetime
 
-from helper import get_project_dir, get_bin_dir
+from UserTiers import get_user_tiers_from_df
+from helper import get_project_dir, get_bin_dir, \
+    get_random_user_and_first_timestamp_from_ratings, \
+    get_user_tier_stratified_user_and_first_timestamp_from_ratings
+
 from movie_lens_retrieval.MovieData import MovieData
 from movie_lens_retrieval.Retriever import Retriever
 from movie_lens_retrieval.UserData import UserData
@@ -95,7 +99,7 @@ class TestAnalysis(unittest.TestCase):
         
         self.user_data = UserData(self.users_path)
         self.movie_data = MovieData(self.movies_path, self.MOVIE_OFFSET)
-    
+        
         self.max_k = 20
     
     def test_plot_movie_embeddings(self):
@@ -111,42 +115,365 @@ class TestAnalysis(unittest.TestCase):
     def test_cold_start_distance(self):
         self.simulate_cold_start_embeddings()
         
+    def test_inter_list_diversity(self):
+        
+        output_file_path = os.path.join(get_bin_dir(), "interlist_diversity.json")
+        
+        agg_res = dict()
+        
+        # random sample of all users
+        # random sample of statified tier users
+        # random sample of all users but catalog exanded to include cold-start metrics
+        
+        n_samples = 500
+        
+        top_k = 100
+        # (tf.Tensor, ScannSearcher)
+        (movie_embeddings, indexer) = self.create_movie_indexer(top_k)
+        
+        num_catalog_movies = self.model_dict['n_movies']
+        
+        # ========= random sample of all users ==========================
+        
+        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
+        (user_ids, timestamps) = get_random_user_and_first_timestamp_from_ratings(pos_test_df, n_samples)
+        user_ids = np.expand_dims(user_ids, axis=1)
+        timestamps = np.expand_dims(timestamps, axis=1)
+        
+        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps) #tf.Tensor shape (5096, 32)
+       
+        #neighbors shape is (n_samples, top_k)
+        neighbors, distances = indexer.search_batched(user_embeddings)
+        
+        ## if the dataset samle were > 100_000, we could MinHash to conserve memory
+        ## instead of the fast vectorized matrices with BLAS optimization that
+        ## we use here to calc Jaccard similarity
+        inter_user_diversity, mean_jaccard = self.calculate_exact_inter_user_diversity(
+            neighbors, num_catalog_movies
+        )
+        
+        res = self.analyze_inter_user_diversity(mean_jaccard, num_catalog_movies, top_k, "all_users",
+            baseline_jaccard = None
+        )
+        
+        agg_res = agg_res | res
+        
+        # ======= stratified by user_tier ====================
+        user_tier_map = self.get_user_tiers()
+        
+        tier_user_ids_timestamps = get_user_tier_stratified_user_and_first_timestamp_from_ratings(
+            ratings_df = pos_test_df,
+            user_tier_map = user_tier_map,
+            sample_size = n_samples)
+        
+        for tier in range(0, 3):
+            user_ids, timestamps = tier_user_ids_timestamps[tier]
+            user_ids = np.expand_dims(user_ids, axis=1)
+            timestamps = np.expand_dims(timestamps, axis=1)
+            user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
+            # neighbors shape is (n_samples, top_k)
+            neighbors, distances = indexer.search_batched(user_embeddings)
+            inter_user_diversity, mean_jaccard = self.calculate_exact_inter_user_diversity(
+                neighbors, num_catalog_movies
+            )
+            res = self.analyze_inter_user_diversity(mean_jaccard,
+                num_catalog_movies, top_k, f"tier_{tier}",
+                baseline_jaccard=None
+            )
+            
+            agg_res = agg_res | res
+        
+        
+        print("inter_user_diversity\n", json.dumps(agg_res, indent=4))
+        
+        with open(output_file_path, "w") as f:
+            json.dump(agg_res, f, indent=4)
+    
     def test_intra_list_diversity(self):
         
         output_file_path = os.path.join(get_bin_dir(), "intralist_diversity.json")
 
+        # make indexer for movie embeddings
+        top_k = 100
+        # (tf.Tensor, ScannSearcher)
+        (movie_embeddings, indexer) = self.create_movie_indexer(top_k)
+        
+        agg_res = dict()
+        
         pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
         first_interactions_df = pos_test_df.group_by("user_id").agg(pl.col("timestamp").min())
         user_ids = first_interactions_df["user_id"].to_numpy()
+        print(f'n unique users in test ds={len(user_ids)}')
         user_ids = np.expand_dims(user_ids, axis=1)
         timestamps = first_interactions_df["timestamp"].to_numpy()
         timestamps = np.expand_dims(timestamps, axis=1)
         user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps) #tf.Tensor shape (5096, 32)
         
-        #make indexer for movie embeddings
-        top_k = 100
-        #(tf.Tensor, ScannSearcher)
-        (movie_embeddings, indexer)  = self.create_movie_indexer(top_k)
-        
         neighbors, distances = indexer.search_batched(user_embeddings)
-        #neighbors += self.MOVIE_OFFSET
         if isinstance(neighbors, np.ndarray):
             neighbors = tf.convert_to_tensor(neighbors, dtype=tf.int32)
-        # --- SAFETY CHECK: Check bounds ---
-        max_index = tf.reduce_max(neighbors)
-        min_index = tf.reduce_min(neighbors)
-        catalog_size = tf.shape(movie_embeddings)[0]
-        
-        print(f"Catalog size: {catalog_size.numpy()}")
-        print(f"Max index in neighbors: {max_index.numpy()}")
-        print(f"Min index in neighbors: {min_index.numpy()}")
         
         res = self.calculate_batched_intra_list_diversity(neighbors, movie_embeddings)
+        
         print(f"Average Intra-List Diversity @ {top_k}\n: {json.dumps(res, indent=4)}")
         
         with open(output_file_path, "w") as f:
             json.dump(res, f, indent=4)
-            
+
+
+    def get_user_tiers(self) -> Dict[int, int]:
+        out = {}
+        for file_path in self.ratings_dict["positive_history"]:
+            ratings_df = self.read_ratings_to_df(file_path)
+            tier_map = get_user_tiers_from_df(ratings_df)
+            out = out | tier_map
+        return out
+        
+    def analyze_inter_user_diversity(self,
+            mean_jaccard: float,
+            num_catalog_movies: int,
+            top_k: int,
+            dict_tag: str,
+            baseline_jaccard: Optional[float] = None,
+            baseline_name: str = "Standard Test",
+            exp_name: str = "Cold Start"
+    ) -> Dict[str, Any]:
+        """
+        Computes analytical random Jaccard floor, evaluates personalization/homogenization,
+        and generates automated diagnostic text conclusions.
+
+        Args:
+            mean_jaccard: Mean pairwise Jaccard similarity across users (0.0 to 1.0).
+            num_catalog_movies: Total unique movies in catalog (M).
+            top_k: Candidate slate size evaluated (K).
+            baseline_jaccard: Optional Jaccard score from standard test run for comparison.
+        """
+        inter_user_diversity = 1.0 - mean_jaccard
+        
+        ## interpret the results
+        # mean_jaccard J: measures the overlap across different users.
+        #    a higher value means that every user gets the same recommendation list
+        #    which means there is a high popularity bias
+        # inter_user_diversity UID = 1 - J: measures how unique recommendations are
+        #    across candidates.  Max is 1.0.  Higher values indicate more personalization.
+        # baseline:  a random baseline for analysis uses
+        #    top_k items picked uniformly randomly from num_catalog_movies.
+        #    then the expected jaccard similarity between any 2 users is
+        #    modeled using item retrieval process as a probability problem using the Hypergeometric
+        #    distribution and then applying a first-order approximation.
+        #    Let M = num_catalog_movies
+        #    Let A and B be the candidate slates for two different users,
+        #    where both slates have exactly top_k randomly chosen items.
+        #    J = |intersection| / |union|
+        #       rewrite using exclusion inclusion principle
+        #       |A union B| = |A| + |B| - |A intersect B|
+        #          and since these are sizes, we know |A| and |B| are each top_k in size
+        #       |A union B| = 2*top_k - |A intersect B|
+        #    lex X = |A intersect B|
+        #    then J = X / (2 * top_k - X)
+        #
+        #        A and B are each drawn without replacement from the whole catalog.
+        #        X follows a hypergeometric distribution.
+        #        consider A tagged, then we want to know how many of B are tagged.
+        #        M = catalog
+        #        K = size of A's slate
+        #        n = number of draws of B
+        #        E[X] = mean = n * K / M = K * K / M
+        #
+        #        E[J_random] = E[X / (2*top_k - X)]
+        #           the variance of the hypergeometric is about equal to the mean when the catalog is much larger than the slate size
+        #           so then we can simplify
+        #        E[J_random] = E[X] / (2 * top_k - E[X])
+        #        We can simplify the E[J(X)] = J(E[X]) because of Taylor series expansion and nearly negligible 2nd order terms.
+        #             To find the expectation of a non-linear function f(X) which is J(x) here,
+        #             we expand it around its mean mu = E[X] using a Taylor series:
+        #               f(X) ~ f(mu) - (X-mu)*f(mu)' + (1/2)*(X-mu)^2*f(mu)''
+        #             take expected value of both sides
+        #               E[f(X)] ~ E[f(mu) - (X-mu)*f(mu)' + (1/2)*(X-mu)^2*f(mu)'']
+        #             by linearity of expectation, we have that the expected value of a sum is the sum of the expected values
+        #                E[f(X)] ~ E[f(mu)] - E[(X-mu)*f(mu)'] + E[(1/2)*(X-mu)^2*f(mu)'']
+        #             because mu = E[X] and that is a constant scalar, not a random variable, we can take it outside of the Expectation.
+        #                E[f(X)] ~ f(mu) - E[(X-mu)]*f(mu)' + E[(X-mu)^2]*(1/2)*f(mu)''
+        #                E[f(X)] ~ f(mu) - (E[X]-mu)*f(mu)' + E[(X-mu)^2]*(1/2)*f(mu)''
+        #                E[f(X)] ~ f(mu) - 0 + E[(X-mu)^2]*(1/2)*f(mu)''
+        #                   by definition Var(X) is E[(X-mu)^2]
+        #                E[f(X)] ~ f(mu) + Var(X)*(1/2)*f(mu)''
+        #                   because the 2nd term is very small we have
+        #                E[f(X)] ~ f(mu)
+        #                E[J(X)] ~ J(E[X]) + error
+        #    J = X / (2 * top_k - X)
+        #    E[J_random] = top_k / (2 * num_catalog_movies - top_k)
+        
+        # 1. Analytical Expected Random Jaccard Floor: E[J] = K / (2M - K)
+        expected_random_jaccard = top_k / max(1,(2 * num_catalog_movies) - top_k)
+        expected_random_iud = 1.0 - expected_random_jaccard
+        
+        # 2. Overlap Multiplier (How many times more overlapping than random?)
+        jaccard_multiplier = mean_jaccard / max(1e-9, expected_random_jaccard)
+        
+        # --- 3. Build Metrics Summary ---
+        metrics = {
+            "mean_jaccard_similarity": round(mean_jaccard, 6),
+            "inter_user_diversity": round(inter_user_diversity, 6),
+            "expected_random_jaccard": round(expected_random_jaccard, 6),
+            "expected_random_iud": round(expected_random_iud, 6),
+            "jaccard_multiplier_vs_random": round(jaccard_multiplier, 2)
+        }
+        
+        if baseline_jaccard is not None:
+            jaccard_abs_change = mean_jaccard - baseline_jaccard
+            jaccard_rel_change = ((mean_jaccard - baseline_jaccard) / baseline_jaccard * 100) if baseline_jaccard != 0 else 0.0
+            metrics[f"{baseline_name}_jaccard"] = round(baseline_jaccard, 6)
+            metrics["jaccard_abs_change"] = round(jaccard_abs_change, 6)
+            metrics["jaccard_rel_change_pct"] = f"{jaccard_rel_change:+.2f}%"
+        
+        # --- 4. Automated Text Conclusions ---
+        conclusions = []
+        
+        # Absolute Personalization Health Checks
+        if jaccard_multiplier >= 15.0:
+            conclusions.append(
+                f"[HIGH CATALOG HOMOGENIZATION]: Mean Jaccard overlap ({mean_jaccard * 100:.2f}%) is {jaccard_multiplier:.1f}x higher "
+                f"than random chance ({expected_random_jaccard * 100:.2f}%). The query tower is over-indexing on popular items "
+                f"and serving near-identical candidate slates across different users."
+            )
+        elif jaccard_multiplier >= 4.0:
+            conclusions.append(
+                f"[MODERATE PERSONALIZATION]: Mean Jaccard overlap ({mean_jaccard * 100:.2f}%) is {jaccard_multiplier:.1f}x random chance "
+                f"({expected_random_jaccard * 100:.2f}%). Candidate slates share core popular hubs while retaining user-specific targeting."
+            )
+        else:
+            conclusions.append(
+                f"[HYPER-PERSONALIZED SLATES]: Mean Jaccard overlap ({mean_jaccard * 100:.2f}%) aligns closely with random chance "
+                f"({expected_random_jaccard * 100:.2f}%). Candidate slates are highly individualized across users."
+            )
+        
+        # Run Comparison (e.g., Cold Start vs Standard Test)
+        if baseline_jaccard is not None:
+            j_shift = ((
+                                   mean_jaccard - baseline_jaccard) / baseline_jaccard) * 100
+            if j_shift >= 25.0:
+                conclusions.append(
+                    f"[COLD-START POPULARITY RETREAT]: Jaccard slate overlap increased by {j_shift:+.1f}% under {exp_name} "
+                    f"({baseline_jaccard * 100:.2f}% -> {mean_jaccard * 100:.2f}%). Without user interaction history, "
+                    f"the query tower retreats to retrieving generic popular blockbusters."
+                )
+            elif j_shift <= -25.0:
+                conclusions.append(
+                    f"[COLD-START DIVERGENT SPRAY]: Jaccard slate overlap dropped by {abs(j_shift):.1f}% under {exp_name} "
+                    f"({baseline_jaccard * 100:.2f}% -> {mean_jaccard * 100:.2f}%). Without interaction history, "
+                    f"metadata embeddings scatter users across ungrounded regions of the catalog."
+                )
+            else:
+                conclusions.append(
+                    f"[STABLE INTER-USER SEPARATION]: {exp_name} maintains consistent cross-user slate overlap relative to {baseline_name} "
+                    f"({baseline_jaccard * 100:.2f}% vs {mean_jaccard * 100:.2f}%)."
+                )
+        
+        return {
+            f"{dict_tag}_inter_user_diversity_metrics": metrics,
+            f"{dict_tag}_inter_user_diversity_conclusions": conclusions
+        }
+    
+    def calculate_exact_inter_user_diversity(self,
+            neighbors: np.ndarray,
+            num_catalog_movies: int
+    ) -> tuple[float, float]:
+        """
+        Computes exact Inter-User Diversity (1 - Jaccard Similarity) across user slates.
+
+        Args:
+            neighbors: (n_samples, top_k) array of retrieved movie IDs.
+            num_catalog_movies: Total number of movies in the catalog.
+
+        Returns:
+            inter_user_diversity (float), mean_jaccard_similarity (float)
+        """
+        n_samples, top_k = neighbors.shape
+        
+        # |A union B| = |A| + |B| - |A intersect B| = 2*top_k - |A intersect B|
+        
+        # Create a dense matrix of user-item interactions
+        # Shape: (n_samples, num_catalog_movies). We use float32 for fast BLAS matmul.
+        # if num_catalog_movies were > 100_000 we would use MinHash instead of this method
+        A = np.zeros((n_samples, num_catalog_movies), dtype=np.float32)
+        
+        # Advanced indexing to populate the retrieved items instantly
+        row_indices = np.arange(n_samples)[:, None]
+        A[row_indices, neighbors] = 1.0
+        #for each row in A, the ones are indictors of the neighbors indices
+        #so now it contains indicators for B
+        
+        # Matrix Multiplication to find all pairwise intersections
+        # A @ A.T yields a matrix where element (i,j) is the number of shared items
+        intersections = A @ A.T
+        
+        # Calculate Unions
+        unions = (2 * top_k) - intersections
+        
+        # Calculate pairwise Jaccard Similarity
+        # Add a small epsilon to prevent division by zero in extreme edge cases
+        jaccard_matrix = intersections / (unions + 1e-9)
+        
+        # Extract the average (ignoring the diagonal where users compare to themselves)
+        total_jaccard = np.sum(jaccard_matrix) - np.trace(jaccard_matrix)
+        num_pairs = n_samples * (n_samples - 1)
+        
+        mean_jaccard = float(total_jaccard / num_pairs)
+        
+        # Inter-User Diversity is the complement of Jaccard Similarity
+        inter_user_diversity = 1.0 - mean_jaccard
+        
+        return inter_user_diversity, mean_jaccard
+    
+    def calculate_minhash_inter_user_diversity(self,
+            neighbors: np.ndarray,
+            num_hashes: int = 150
+    ) -> tuple[float, float]:
+        """
+        Approximates Inter-User Diversity using MinHash signatures (MMDS approach).
+        good to use when neighbors[-1] > 100_000
+        """
+        n_samples, top_k = neighbors.shape
+        
+        # Large prime number for the hash function: h(x) = (ax + b) % c
+        # Usually choose a prime just larger than the max item ID which
+        # is 3883 in this case, but if the ids were transformed to include
+        #  self.MOVIES_OFFSET, would need to use another Merseinne prime: 16383
+        prime = 8191
+        
+        # Generate random coefficients for the hash functions
+        # Shapes: (num_hashes, 1, 1) for broadcasting
+        a = np.random.randint(1, prime, size=(num_hashes, 1, 1))
+        b = np.random.randint(0, prime, size=(num_hashes, 1, 1))
+        
+        # 1. Compute hash values for every item in every user's slate
+        # neighbors shape broadcasted to (1, n_samples, top_k)
+        # Output shape: (num_hashes, n_samples, top_k)
+        hashed_values = (a * neighbors[None, :, :] + b) % prime
+        
+        # 2. Create MinHash Signatures
+        # Take the minimum hash value across the 'top_k' items for each user
+        # Output shape: (num_hashes, n_samples)
+        signatures = np.min(hashed_values, axis=2)
+        
+        # 3. Compare signatures pairwise
+        # Two signatures match with probability == Jaccard Similarity
+        # Broadcasting magic: (num_hashes, n_samples, 1) == (num_hashes, 1, n_samples)
+        matches = (signatures[:, :, None] == signatures[:, None, :])
+        
+        # Calculate estimated Jaccard by averaging matches across hash functions
+        # jaccard_est shape: (n_samples, n_samples)
+        jaccard_est = np.mean(matches, axis=0)
+        
+        # Average across all user pairs, ignoring the diagonal
+        total_jaccard = np.sum(jaccard_est) - np.trace(jaccard_est)
+        num_pairs = n_samples * (n_samples - 1)
+        
+        mean_jaccard = float(total_jaccard / num_pairs)
+        inter_user_diversity = 1.0 - mean_jaccard
+        
+        return inter_user_diversity, mean_jaccard
     
     def calculate_batched_intra_list_diversity(
             self,
@@ -301,24 +628,17 @@ class TestAnalysis(unittest.TestCase):
         new_inputs = original_inputs.copy()
         new_inputs["movie_id"] = tf.constant(new_movie_ids)
         
-        original_embeddings : tf.Tensor = self._create_movie_embeddings_batch(original_inputs)
+        #original_embeddings : tf.Tensor = self._create_movie_embeddings_batch(original_inputs)
         new_embeddings : tf.Tensor = self._create_movie_embeddings_batch(new_inputs)
         
-        full_movie_emb_ds : TFRecordDataset = self.read_embeddings_to_tfds(file_path=self.movie_emb_path,
-            em_feature_spec=self.emb_movie_feature_spec)
-        full_movie_ids = []
-        full_movie_embeddings = []
-        for batch in full_movie_emb_ds.batch(1024).as_numpy_iterator():
-            full_movie_ids.append(batch['movie_id'])  #a numpy array
-            full_movie_embeddings.append(batch['embedding'])  # a numpy array
-        full_movie_ids = np.concatenate(full_movie_ids, axis=0)
-        full_movie_embeddings = np.concatenate(full_movie_embeddings, axis=0)
+        full_movie_ids, full_movie_embeddings = self.read_movie_embeddings()
        
         top_k = 100
-        #build indexes
         orig_indexer = Retriever.build_scann_searcher(embeddings=full_movie_embeddings, top_k=top_k)
         
-        #for each new_movie_ids, replace with embedding for new_movie_ids
+        #for each new_movie_ids, replace with embedding for new_movie_ids.
+        #this not only subtracts the old and inserts the new, but gives them the same index so that they
+        # are findable when compared to the ground truth ratings.
         for i, m_id in enumerate(original_movie_ids):
             idx = m_id - self.MOVIE_OFFSET
             assert(full_movie_ids[idx] == m_id)
@@ -513,9 +833,7 @@ class TestAnalysis(unittest.TestCase):
         )
         
         # Group ground truth items and their tiers per user
-        gt_grouped = (
-            ground_truth_df
-            .group_by("user_id")
+        gt_grouped = (ground_truth_df.group_by("user_id")
             .agg([
                 pl.col("movie_id").alias("gt_movies"),
                 pl.col("tier").alias("gt_tiers")
@@ -538,7 +856,7 @@ class TestAnalysis(unittest.TestCase):
             
             # Track Retrieved Candidate Composition (What tiers were retrieved?)
             for m_id in retrieved_list:
-                m_tier = catalog_tier_map.get(m_id)
+                m_tier = catalog_tier_map.get(m_id, 2) #default to 2 for cold-start movies
                 if m_tier in retrieved_tier_counts:
                     retrieved_tier_counts[m_tier] += 1
                 total_retrieved_items += 1
@@ -743,5 +1061,19 @@ class TestAnalysis(unittest.TestCase):
         # plt.show()
         plt.close()
     
+    def read_movie_embeddings(self) -> Tuple[np.ndarray, np.ndarray]:
+        full_movie_emb_ds: TFRecordDataset = self.read_embeddings_to_tfds(
+            file_path=self.movie_emb_path,
+            em_feature_spec=self.emb_movie_feature_spec)
+        full_movie_ids = []
+        full_movie_embeddings = []
+        for batch in full_movie_emb_ds.batch(1024).as_numpy_iterator():
+            full_movie_ids.append(batch['movie_id'])  # a numpy array
+            full_movie_embeddings.append(batch['embedding'])  # a numpy array
+        full_movie_ids = np.concatenate(full_movie_ids, axis=0)
+        full_movie_embeddings = np.concatenate(full_movie_embeddings, axis=0)
+        return (full_movie_ids, full_movie_embeddings)
+
+
 if __name__ == '__main__':
     unittest.main()

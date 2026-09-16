@@ -7,7 +7,7 @@ from numpy import ndarray as ndarray
 class UserData(object):
     def __init__(self, users_path:str):
         """
-        given path ot user file, creates a datastructure for movie_id access
+        given path to user file, creates a datastructure for movie_id access
         :param users_path: path to the users.dat file containing fields movie_id, gender, age, occupation, zipcode.
         For now, provide a parquet file.  Also note that the user_ids must be ordered from 1 to N.
         """

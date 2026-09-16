@@ -7,7 +7,7 @@ to python here to have it all in one place
 import json
 import os
 import unittest
-from typing import Any, Dict, Union, Tuple
+from typing import Any, Dict, Union, Tuple, List
 import polars as pl
 import msgpack
 from array_record.python import array_record_module
@@ -26,7 +26,7 @@ from helper import get_project_dir, get_bin_dir
 from movie_lens_retrieval.MovieData import MovieData
 from movie_lens_retrieval.Retriever import Retriever
 from movie_lens_retrieval.UserData import UserData
-
+from scann.scann_ops.py.scann_ops_pybind import ScannSearcher
 
 class TestAnalysis(unittest.TestCase):
     def setUp(self):
@@ -50,7 +50,7 @@ class TestAnalysis(unittest.TestCase):
         
         self.model_dict = self.read_model_assets_hparams(
             self.user_movie_models_dir)
-        self.MOVIE_OFFSET = self.model_dict['n_users'] + 1
+        self.MOVIE_OFFSET : int = self.model_dict['n_users'] + 1
         self.embed_dim = json.loads(self.model_dict['layer_sizes'])[-1]
         self.user_id_range_incl = [1, self.model_dict['n_users']]
         self.movie_id_range_incl = [self.MOVIE_OFFSET, self.MOVIE_OFFSET + self.model_dict['n_movies']]
@@ -111,6 +111,130 @@ class TestAnalysis(unittest.TestCase):
     def test_cold_start_distance(self):
         self.simulate_cold_start_embeddings()
         
+    def test_intra_list_diversity(self):
+        
+        output_file_path = os.path.join(get_bin_dir(), "intralist_diversity.json")
+
+        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
+        first_interactions_df = pos_test_df.group_by("user_id").agg(pl.col("timestamp").min())
+        user_ids = first_interactions_df["user_id"].to_numpy()
+        user_ids = np.expand_dims(user_ids, axis=1)
+        timestamps = first_interactions_df["timestamp"].to_numpy()
+        timestamps = np.expand_dims(timestamps, axis=1)
+        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps) #tf.Tensor shape (5096, 32)
+        
+        #make indexer for movie embeddings
+        top_k = 100
+        #(tf.Tensor, ScannSearcher)
+        (movie_embeddings, indexer)  = self.create_movie_indexer(top_k)
+        
+        neighbors, distances = indexer.search_batched(user_embeddings)
+        #neighbors += self.MOVIE_OFFSET
+        if isinstance(neighbors, np.ndarray):
+            neighbors = tf.convert_to_tensor(neighbors, dtype=tf.int32)
+        # --- SAFETY CHECK: Check bounds ---
+        max_index = tf.reduce_max(neighbors)
+        min_index = tf.reduce_min(neighbors)
+        catalog_size = tf.shape(movie_embeddings)[0]
+        
+        print(f"Catalog size: {catalog_size.numpy()}")
+        print(f"Max index in neighbors: {max_index.numpy()}")
+        print(f"Min index in neighbors: {min_index.numpy()}")
+        
+        res = self.calculate_batched_intra_list_diversity(neighbors, movie_embeddings)
+        print(f"Average Intra-List Diversity @ {top_k}\n: {json.dumps(res, indent=4)}")
+        
+        with open(output_file_path, "w") as f:
+            json.dump(res, f, indent=4)
+            
+    
+    def calculate_batched_intra_list_diversity(
+            self,
+            neighbors: tf.Tensor,  # shape: (num_users, top_k)
+            movie_embeddings: tf.Tensor,
+            # shape: (num_catalog_movies, 32) (unit-normalized)
+            num_random_samples: int = 200
+            # Number of random slates to draw for baseline
+    ) -> Dict[str, Any]:
+        """
+        Computes average Intra-List Diversity (ILD) across a batch of users,
+        estimates the random catalog ILD baseline via Monte Carlo sampling,
+        and returns an automated text analysis.
+
+        Args:
+            neighbors: 2D tensor of retrieved item indices from ScaNN.
+            movie_embeddings: 2D tensor of all item embeddings.
+            num_random_samples: Number of random user slates used to compute random ILD.
+
+        Returns:
+            Dict with keys: 'model_ild', 'random_ild', 'diversity_ratio', and 'analysis'.
+        """
+        num_users = tf.shape(neighbors)[0]
+        top_k = tf.shape(neighbors)[1]
+        num_catalog_movies = tf.shape(movie_embeddings)[0]
+        
+        # --- Helper: Vectorized ILD calculation for any batch of slates ---
+        def _compute_ild(slate_indices: tf.Tensor) -> tf.Tensor:
+            # Fetch embeddings: (batch_size, top_k, 32)
+            slate_embeddings = tf.gather(movie_embeddings, slate_indices)
+            
+            # Batch Matrix Multiplication: (batch_size, top_k, top_k)
+            sim_matrices = tf.matmul(slate_embeddings, slate_embeddings, transpose_b=True)
+            dist_matrices = 1.0 - sim_matrices
+            
+            # Zero out self-distances on the diagonal
+            n_slates = tf.shape(slate_indices)[0]
+            k = tf.shape(slate_indices)[1]
+            zeros_diagonal = tf.zeros((n_slates, k), dtype=dist_matrices.dtype)
+            dist_matrices = tf.linalg.set_diag(dist_matrices, zeros_diagonal)
+            
+            # Pairwise distance sum / total possible pairs
+            sum_dists_per_slate = tf.reduce_sum(dist_matrices, axis=[1, 2])
+            num_pairs = tf.cast(k * (k - 1), dtype=dist_matrices.dtype)
+            return tf.reduce_mean(sum_dists_per_slate / num_pairs)
+        
+        # Compute Model ILD
+        model_ild_tf = _compute_ild(neighbors)
+        model_ild = float(model_ild_tf.numpy())
+        
+        # Estimate Empirical Random Baseline ILD
+        random_indices = tf.random.uniform(
+            shape=(num_random_samples, top_k),
+            minval=0,
+            maxval=num_catalog_movies,
+            dtype=tf.int32
+        )
+        random_ild_tf = _compute_ild(random_indices)
+        random_ild = float(random_ild_tf.numpy())
+        
+        # Compute Diversity Ratio (% of random catalog diversity retained)
+        diversity_ratio = model_ild / random_ild if random_ild > 0 else 0.0
+        
+        # Automated Text Analysis
+        analysis = []
+        if diversity_ratio < 0.20:
+            analysis.append(
+                f"[EXTREME CLUSTERING]: Model ILD ({model_ild:.4f}) retains only {diversity_ratio * 100:.1f}% of random catalog diversity. "
+                f"Risk of severe candidate bottlenecking into a single sub-genre."
+            )
+        elif diversity_ratio < 0.50:
+            analysis.append(
+                f"[FOCUSED CANDIDATE POOL]: Model ILD ({model_ild:.4f}) retains {diversity_ratio * 100:.1f}% of random catalog diversity. "
+                f"This indicates strong, coherent cluster targeting around user preferences."
+            )
+        else:
+            analysis.append(
+                f"[BROAD CANDIDATE POOL]: Model ILD ({model_ild:.4f}) retains {diversity_ratio * 100:.1f}% of random catalog diversity. "
+                f"Candidates span multiple distinct semantic regions in the embedding space."
+            )
+        
+        return {
+            "model_ild": round(model_ild, 6),
+            "random_ild": round(random_ild, 6),
+            "diversity_ratio": round(diversity_ratio, 4),
+            "analysis": analysis
+        }
+    
     def simulate_cold_start_embeddings(self):
         '''
         
@@ -220,6 +344,26 @@ class TestAnalysis(unittest.TestCase):
         with open(output_file_path, "w") as f:
             json.dump(res, f, indent=4)
     
+    def create_movie_indexer(self, top_k: int) -> Tuple[tf.Tensor, ScannSearcher]:
+        full_movie_emb_ds: TFRecordDataset = self.read_embeddings_to_tfds(
+            file_path=self.movie_emb_path, em_feature_spec=self.emb_movie_feature_spec)
+        
+        full_movie_ids = []
+        full_movie_embeddings = []
+        for batch in full_movie_emb_ds.batch(1024):
+            full_movie_ids.append(batch['movie_id'])  # a numpy array
+            full_movie_embeddings.append(batch['embedding'])  # a numpy array
+        full_movie_ids = tf.concat(full_movie_ids, axis=0)
+        full_movie_embeddings = tf.concat(full_movie_embeddings, axis=0)
+        
+        #just in case they are no longer in order of increasing movie_id
+        sorted_indices = tf.argsort(full_movie_ids, direction='ASCENDING')
+        full_movie_ids = tf.gather(full_movie_ids, sorted_indices)
+        full_movie_embeddings = tf.gather(full_movie_embeddings, sorted_indices)
+        
+        indexer = Retriever.build_scann_searcher(embeddings=full_movie_embeddings, top_k=top_k)
+        return (full_movie_embeddings, indexer)
+        
     def compare_retrieval_runs(
             self,
             baseline: Dict[str, Any],

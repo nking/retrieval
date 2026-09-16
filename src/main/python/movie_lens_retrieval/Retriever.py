@@ -379,7 +379,7 @@ class Retriever:
         return inp_dict
    
     @staticmethod
-    def build_scann_searcher(embeddings: tf.Tensor, top_k: int):
+    def build_scann_searcher(embeddings: tf.Tensor, top_k: int) -> scann.scann_ops_pybind.ScannSearcher:
         """
         build an ScANN indexer initialized with embeddings, and top_k number of nearest neighbors,
         and the brute force algorithm.

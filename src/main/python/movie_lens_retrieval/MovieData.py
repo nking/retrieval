@@ -44,4 +44,33 @@ class MovieData(object):
             'movie_id': movie_id,
             'genres': tf.gather(self.genres, idx)
         }
+
+
+def get_movie_tiers_df(ratings_df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Given a Polars DataFrame with ['movie_id', ...],
+    returns a DataFrame with 'movie_id', 'movie_tier' where tier is 0, 1, or 2 for
+         head, torso, and tail of the distribution of the number of users ratings.
+    """
+    # Count history length per user
+    counts = ratings_df.group_by("movie_id").agg(
+        pl.len().alias("movie_counts")
+    )
     
+    # Find the exact cutoff lengths based on quantiles
+    tail_cutoff_val = counts["movie_counts"].quantile(0.20,
+        interpolation="nearest")
+    head_cutoff_val = counts["movie_counts"].quantile(0.80,
+        interpolation="nearest")
+    
+    # Map to tiers based on the cutoffs
+    movie_tiers_df = counts.with_columns(
+        pl.when(pl.col("movie_counts") <= tail_cutoff_val)
+        .then(2)  # Tail
+        .when(pl.col("movie_counts") >= head_cutoff_val)
+        .then(0)  # Head
+        .otherwise(1)  # Torso
+        .alias("movie_tier")
+    ).select(["movie_id", "movie_tier"])
+    
+    return movie_tiers_df

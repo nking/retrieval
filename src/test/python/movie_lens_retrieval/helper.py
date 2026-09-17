@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict
+from typing import List, Dict, Union
 import tensorflow as tf
 import polars as pl
 from numpy import ndarray
@@ -74,29 +74,32 @@ def load_list_of_globs_into_tfrecords(list_of_globs:List[str], batch_size:int=25
   dataset = records_dataset.cache().batch(batch_size).prefetch(tf.data.AUTOTUNE)
   return dataset
 
-def get_user_tier_stratified_user_and_first_timestamp_from_ratings(
+def get_stratified_user_and_first_timestamp_from_ratings(
         ratings_df: pl.DataFrame,
-        user_tier_map : Dict[int, int],
         sample_size: int = None,
+        stratification_key : str = "user_tier",
+        stratification_values : List = [0, 1, 2],
         seed: int = 42
 ) -> Dict[int, tuple[ndarray, ndarray]]:
     """
-    given a ratings_df and a user_tier_map, return a tuple for each user_tier.  The tuple is
+    given a ratings_df that includes "stratification_key" column,
+       return a dictionary of tuple for each stratification_key.  The tuple is
     an array of user_ids and a parallel array of the first timestamps of that user in ratings_df.
     If sample_size is not None, then a random sample of those is returned for each tier.
     :param ratings_df: a polars DataFram with columns "user_id", "movie_id",  "rating" and "timestamp"
-    :param user_tier_map: a dictionary with key=user_id, value=tier where tier is 0, 1, or 2 for
+       and the stratification_key column.
+    :param stratification_key: e.g. "user_tier" or movie_tier"
+    :param user_tiers: a dictionary with key=user_id, value=tier where tier is 0, 1, or 2 for
     the head, torso or tail of the distribution for the number of ratings per user.
+    A pl.DataFrame with columns user_id, tier is acceptable instead also
     :param sample_size: if given, a random sample of the data are returned per tier
     :param seed: a random number generator seed
     :return: a dictionary with key=tier, value=(user_ids, timestamps) which are np.ndarrays
     """
     out = {}
-    for tier in range(0, 3):
-        user_set = {u_id for u_id, t in user_tier_map.items() if t == tier}
+    for tier in stratification_values:
         unique_users_df = (
-            ratings_df
-            .filter(pl.col("user_id").is_in(user_set))
+            ratings_df.filter(pl.col(stratification_key)==tier)
             .group_by("user_id")
             .agg(pl.col("timestamp").min().alias("timestamp"))
         )

@@ -21,10 +21,12 @@ import tensorflow as tf
 import numpy as np
 import json
 from datetime import datetime
+from itertools import chain
 
 from helper import get_project_dir, get_bin_dir, \
     get_random_user_and_first_timestamp_from_ratings, \
-    get_stratified_user_and_first_timestamp_from_ratings
+    get_stratified_user_and_first_timestamp_from_ratings, \
+    get_user_and_first_timestamp_from_ratings
 
 from movie_lens_retrieval.MovieData import MovieData, get_movie_tiers_df
 from movie_lens_retrieval.Retriever import Retriever
@@ -116,8 +118,257 @@ class TestAnalysis(unittest.TestCase):
         then stratifying the results by movie_tier and user_tier.
         :return:
         """
-        output_file_path = os.path.join(get_bin_dir(), "coverage.json")
+        out_dir = os.path.join(get_bin_dir(), "coverage")
+        shutil.rmtree(out_dir, ignore_errors=True)
+        os.makedirs(out_dir, exist_ok=True)
         
+        output_file_path = os.path.join(out_dir, "coverage.json")
+        
+        agg_res = dict()
+        
+        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
+        
+        user_ids, timestamps = get_user_and_first_timestamp_from_ratings(pos_test_df)
+        user_ids = np.expand_dims(user_ids, axis=1)
+        timestamps = np.expand_dims(timestamps, axis=1)
+        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
+        
+        for top_k in [self.top_k, 20]:
+            
+            if top_k == self.top_k:
+                indexer = self.movie_indexer
+            else:
+                indexer = Retriever.build_scann_searcher(embeddings=self.movie_catalog_embeddings, top_k=top_k)
+            
+            res = dict()
+            neighbors, distances = indexer.search_batched(user_embeddings)
+            neighbors += self.MOVIE_OFFSET
+            
+            retrieval_df = pl.DataFrame({
+                "user_id": user_ids.squeeze(),
+                "movie_id": neighbors  #shape (n_users, top_k)
+            }).explode("movie_id")
+            
+            count = retrieval_df["movie_id"].n_unique()
+            cat_count = self.model_dict['n_movies']
+            res["full_coverage"] = float(count)/float(cat_count)
+            
+            # count by movie_tier
+            retrieval_df = retrieval_df.join(self.movie_tiers_df, on="movie_id", how="left")  #adds column "movie_tier"
+            for movie_tier in range(0, 3):
+                count = retrieval_df.filter(pl.col("movie_tier") == movie_tier)["movie_id"].n_unique()
+                cat_count = self.movie_tiers_df.filter(pl.col("movie_tier") == movie_tier)["movie_id"].count()
+                res[f"movie_tier_{movie_tier}_coverage"] = float(count) / float(cat_count)
+            
+            #count by user_tier
+            retrieval_df = retrieval_df.join(self.user_tiers_df, on="user_id", how="left") #adds column "user_tier"
+            cat_count = self.model_dict['n_movies']
+            for user_tier in range(0, 3):
+                count = retrieval_df.filter(pl.col("user_tier")==user_tier)["movie_id"].n_unique()
+                res[f"user_tier_{user_tier}_coverage"] = float(count) / (float(cat_count))
+                
+            #count by user_tier and movie_tier
+            for user_tier in range(0, 3):
+                df = retrieval_df.filter(pl.col("user_tier") == user_tier)
+                for movie_tier in range(0, 3):
+                    df2 = df.filter(pl.col("movie_tier") == movie_tier)
+                    count = df2["movie_id"].n_unique()
+                    cat_count = self.movie_tiers_df.filter(pl.col("movie_tier") == movie_tier)["movie_id"].count()
+                    res[f"user_tier_{user_tier}_movie_tier_{movie_tier}_coverage"] = float(count) / float(cat_count)
+                    
+            agg_res[f"coverage_k_{top_k}"] = res
+            
+            if top_k != self.top_k:
+                #calc Gini coeff
+                res = dict()
+                # ------------------------------------------------------------------
+                # GINI COEFFICIENT & LORENZ DISTRIBUTION CALCULATION
+                #  gini coeff is a measure of statistical dispersion
+                # this is the rank-based formulation for a discrete population.
+                #    G = (2 * sum_{i=1,n}( i * y_i) / (n * sum_{i=1,n}( i * y_i))
+                #          - ((n+1)/n)
+                #     where y_i is the retrieval count of the movie
+                #           i is the rank of the movie when sorted in ascending order from 1 to n
+                #           n is the total number of iterm in the catalog
+                #     the runtime complexity is limited by the sorting O(N * log(N))
+                # ------------------------------------------------------------------
+                
+                # Must include catalog items with 0 retrievals to avoid underestimating inequality)
+                freq_df = (
+                    self.movie_tiers_df.select("movie_id", "movie_tier")
+                    .join(
+                        retrieval_df.group_by("movie_id").agg(
+                            pl.len().alias("retrieval_count")),
+                        on="movie_id",
+                        how="left"
+                    )
+                    .with_columns(pl.col("retrieval_count").fill_null(0))
+                    .sort("retrieval_count") # Must be sorted ascending for Lorenz & Gini math
+                )
+                
+                n_catalog = freq_df.height
+                total_recs = freq_df["retrieval_count"].sum()
+                
+                if total_recs > 0:
+                    # --- Full Catalog Gini ---
+                    full_gini = freq_df.select(
+                        ((2.0 * (pl.col("retrieval_count") * pl.int_range(1,
+                            n_catalog + 1)).sum()) /
+                         (n_catalog * total_recs)) - (
+                                    (n_catalog + 1.0) / n_catalog)
+                    ).item()
+                    
+                    # --- Lorenz Curve Calculation & Export ---
+                    lorenz_df = freq_df.with_columns(
+                        cum_items_pct=pl.int_range(1,
+                            n_catalog + 1) / n_catalog,
+                        cum_recs_pct=pl.col(
+                            "retrieval_count").cum_sum() / total_recs
+                    )
+                    
+                    # Extract specific analytical points
+                    bottom_80_share = lorenz_df.filter(pl.col("cum_items_pct") <= 0.80)[
+                        "cum_recs_pct"].max()
+                    top_10_share = 1.0 - (lorenz_df.filter(
+                        pl.col("cum_items_pct") <= 0.90)[
+                                              "cum_recs_pct"].max() or 0.0)
+                    
+                    # Export a clean 100-point Lorenz Curve for automated analysis/plotting
+                    # Groups into 1% to 100% buckets and takes the max cumulative share for each
+                    lorenz_curve_array = (
+                        lorenz_df.with_columns(
+                            (pl.col("cum_items_pct") * 100).ceil().cast(
+                                pl.Int32).alias("percentile"))
+                        .group_by("percentile").agg(
+                            pl.col("cum_recs_pct").max())
+                        .sort("percentile")["cum_recs_pct"].to_list()
+                    )
+                    
+                    # --- Gini by Movie Tier ---
+                    for movie_tier in range(0, 3):
+                        tier_freq_df = freq_df.filter(
+                            pl.col("movie_tier") == movie_tier).sort(
+                            "retrieval_count")
+                        n_tier = tier_freq_df.height
+                        tier_recs = tier_freq_df["retrieval_count"].sum()
+                        
+                        tier_gini = 0.0
+                        if tier_recs > 0:
+                            tier_gini = tier_freq_df.select(
+                                ((2.0 * (pl.col(
+                                    "retrieval_count") * pl.int_range(1,
+                                    n_tier + 1)).sum()) /
+                                 (n_tier * tier_recs)) - (
+                                            (n_tier + 1.0) / n_tier)
+                            ).item()
+                        res[f"movie_tier_{movie_tier}_gini"] = float(tier_gini)
+                    
+                    # --- Gini by User Tier ---
+                    for user_tier in range(0, 3):
+                        # Isolate retrievals generated ONLY by this user_tier
+                        tier_retrieval_df = retrieval_df.filter(pl.col("user_tier") == user_tier)
+                        
+                        # Map those isolated retrievals onto the FULL movie catalog
+                        user_tier_freq_df = (
+                            self.movie_tiers_df.select("movie_id")
+                            .join(
+                                tier_retrieval_df.group_by("movie_id").agg(
+                                    pl.len().alias("retrieval_count")),
+                                on="movie_id",
+                                how="left"
+                            )
+                            .with_columns(
+                                pl.col("retrieval_count").fill_null(0))
+                            .sort("retrieval_count")
+                        )
+                        
+                        u_tier_recs = user_tier_freq_df[
+                            "retrieval_count"].sum()
+                        u_tier_gini = 0.0
+                        
+                        if u_tier_recs > 0:
+                            u_tier_gini = user_tier_freq_df.select(
+                                ((2.0 * (pl.col(
+                                    "retrieval_count") * pl.int_range(1,
+                                    n_catalog + 1)).sum()) /
+                                 (n_catalog * u_tier_recs)) - (
+                                            (n_catalog + 1.0) / n_catalog)
+                            ).item()
+                        res[f"user_tier_{user_tier}_gini"] = float(u_tier_gini)
+                
+                else:
+                    full_gini = 0.0
+                    bottom_80_share = 0.0
+                    top_10_share = 0.0
+                    lorenz_curve_array = []
+                
+                res["full_gini"] = float(full_gini)
+                res["lorenz_bottom_80_share"] = float(bottom_80_share)
+                res["lorenz_top_10_share"] = float(top_10_share)
+                res["lorenz_curve_array"] = lorenz_curve_array  # List of 100 floats for JSON export
+                
+                if lorenz_curve_array:
+                    output_lorenz_file_path = os.path.join(out_dir, f"lorenz_curve_k_{top_k}.png")
+                    self.plot_lorenz_curve(lorenz_curve_array, top_k, full_gini, output_lorenz_file_path)
+                
+                # ------------------------------------------------------------------
+                # AUTOMATED INSIGHTS & CONCLUSIONS
+                # ------------------------------------------------------------------
+                conclusions = []
+                
+                if total_recs > 0:
+                    # Insight 1: Overall Popularity Bias (Full Gini)
+                    if full_gini > 0.90:
+                        conclusions.append(
+                            f"SEVERE POPULARITY BIAS: Gini is {full_gini:.2f}. The model is acting as a popularity echo chamber, collapsing onto blockbuster items.")
+                    elif full_gini < 0.45:
+                        conclusions.append(
+                            f"SUSPICIOUSLY UNIFORM: Gini is {full_gini:.2f}. The model may be overly random or popularity suppression (Log-Q/Temperature) is too aggressive.")
+                    else:
+                        conclusions.append(
+                            f"HEALTHY BIAS: Gini is {full_gini:.2f}. The model successfully balances mainstream relevance with catalog exploration.")
+                    
+                    # Insight 2: Long-Tail Health (Bottom 80% Share)
+                    if bottom_80_share < 0.05:
+                        conclusions.append(
+                            f"DEAD TAIL: The bottom 80% of the catalog receives only {bottom_80_share:.1%} of recommendations. Niche items are effectively invisible.")
+                    elif bottom_80_share > 0.15:
+                        conclusions.append(
+                            f"STRONG TAIL: The bottom 80% captures {bottom_80_share:.1%} of traffic, indicating excellent long-tail surfacing capability.")
+                    else:
+                        conclusions.append(
+                            f"MODERATE TAIL: The bottom 80% captures {bottom_80_share:.1%} of traffic.")
+                    
+                    # Insight 3: Head Concentration (Top 10% Share)
+                    if top_10_share > 0.75:
+                        conclusions.append(
+                            f"HEAD HEAVY: The top 10% of items consume {top_10_share:.1%} of all recommendation slots.")
+                    else:
+                        conclusions.append(
+                            f"DIVERSE HEAD: The top 10% consume {top_10_share:.1%} of slots, leaving plenty of room for the torso/tail.")
+                    
+                    # Insight 4: User Cohort Behavior
+                    gini_power = res.get("user_tier_2_gini", 1.0)
+                    gini_light = res.get("user_tier_0_gini", 1.0)
+                    
+                    if gini_power < gini_light - 0.02:  # 0.02 buffer for noise
+                        conclusions.append(
+                            "USER PERSONALIZATION: Power users exhibit lower Gini (more diverse slates) than light users, successfully leveraging rich interaction histories.")
+                    elif gini_power > gini_light + 0.02:
+                        conclusions.append(
+                            "WARNING (COHORT COLLAPSE): Power users have higher concentration (Gini) than light users. The model may be pulling rich histories into dense popularity traps.")
+                    else:
+                        conclusions.append(
+                            "UNIFORM COHORTS: Light and Power users experience roughly the same level of catalog concentration.")
+                
+                res["automated_conclusions"] = conclusions
+                
+                agg_res[f"eval_k_{top_k}"] = res
+                
+        print(f'\n', json.dumps(agg_res, indent=4))
+        with open(output_file_path, "w") as f:
+            json.dump(agg_res, f, indent=4)
+            
         pass
     
     def test_popularity_bias(self):
@@ -173,7 +424,109 @@ class TestAnalysis(unittest.TestCase):
         with open(output_file_path, "w") as f:
             json.dump(agg_res, f, indent=4)
     
-    def test_plot_movie_embeddings(self):
+    def test_embedding_hubness(self):
+        
+        output_file_path = os.path.join(get_bin_dir(), "embedding_hubness.json")
+        
+        agg_res = dict()
+        
+        # GLOBAL ITEM UNIFORMITY (Calculated Once) ---
+        # Evaluates how well the full catalog is distributed across the hypersphere.
+        # We extract this into a helper lambda since we'll reuse the exact math for users.
+        t_param = 2.0
+        
+        def calc_uniformity(embs_np):
+            n = embs_np.shape[0]
+            if n <= 1: return 0.0
+            # Since ||u|| = 1, dist^2 = 2 - 2*(u dot v)
+            dist_sq = 2.0 - 2.0 * np.dot(embs_np, embs_np.T)
+            # Uniformity is log expected value of exp(-t * dist^2)
+            # We subtract 'n' to remove the self-pair diagonals (where exp(0) = 1)
+            sum_off_diag = np.sum(np.exp(-t_param * dist_sq)) - n
+            return np.log(sum_off_diag / (n * (n - 1)))
+        
+        global_item_uniformity = calc_uniformity(self.movie_catalog_embeddings.numpy())
+        
+        agg_res[f"Global Item Uniformity"] = global_item_uniformity
+        
+        #this is the test dataset of positive ratings
+        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
+        pos_test_df = pos_test_df.join(self.user_tiers_df, on="user_id", how="left")
+        #has "user_id", "movie_id", "rating", "timestamp", "user_tier"
+        
+        for user_tier in [0, 1, 2]:
+            
+            #  Isolate the ground-truth positive pairs for this tier
+            tier_pos_df = pos_test_df.filter(pl.col("user_tier") == user_tier)
+            
+            user_ids = np.expand_dims(tier_pos_df["user_id"].to_numpy(), axis=1)
+            timestamps = np.expand_dims(tier_pos_df["timestamp"].to_numpy(), axis=1)
+            pos_movie_ids = tier_pos_df["movie_id"].to_numpy()  # 1D array for indexing
+            
+            # Generate User Embeddings for these specific rows
+            user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
+            u_np = user_embeddings.numpy()  # Shape: (N, emb_dim)
+            
+            # Fast Lookup of corresponding Movie Embeddings
+            # (Assuming your movie_catalog_embeddings index perfectly matches movie_id)
+            m_np = self.movie_catalog_embeddings.numpy()[pos_movie_ids - self.MOVIE_OFFSET]  # Shape: (N, emb_dim)
+            
+            # 5User Uniformity
+            tier_user_uniformity = calc_uniformity(u_np)
+            
+            # Row-wise Dot Product for exact positive pair alignment
+            # Element-wise multiply -> Sum across the embedding dimension
+            pos_dot_products = np.sum(u_np * m_np, axis=1)
+            tier_alignment = np.mean(2.0 - 2.0 * pos_dot_products)
+            
+            agg_res[f"user_tier_{user_tier}"] = {
+                "alignment": float(tier_alignment),
+                "user_uniformity": float(tier_user_uniformity)
+            }
+            
+        # ------------------------------------------------------------------
+        # RULE-BASED CONCLUSIONS
+        # ------------------------------------------------------------------
+        conclusions = []
+        
+        # Rule 1: Global Item Uniformity (Are items collapsed?)
+        # Healthy distributions typically score between -1.5 and -3.5.
+        # Closer to 0 means severe collapse.
+        if global_item_uniformity > -1.0:
+            conclusions.append(f"ITEM COLLAPSE WARNING: Global Item Uniformity is high ({global_item_uniformity:.2f}). The movie catalog is densely clumped together, likely leading to low diversity.")
+        elif global_item_uniformity < -2.5:
+            conclusions.append(f"HEALTHY ITEM DISPERSION: Global Item Uniformity is excellent ({global_item_uniformity:.2f}). Movies are well-distributed across the hypersphere.")
+        else:
+            conclusions.append(f"MODERATE ITEM UNIFORMITY: Items are adequately distributed ({global_item_uniformity:.2f}).")
+    
+        # Rule 2: User Cohort Collapse (Are power users clumping?)
+        u_uni_light = agg_res["user_tier_0"]["user_uniformity"]
+        u_uni_power = agg_res["user_tier_2"]["user_uniformity"]
+        
+        if u_uni_power > u_uni_light + 0.5:
+            conclusions.append(f"POWER USER COLLAPSE: Power users (Tier 2 uniformity: {u_uni_power:.2f}) are significantly more clumped than Light users (Tier 0 uniformity: {u_uni_light:.2f}). Their rich histories are collapsing into dense 'average' vectors.")
+        else:
+            conclusions.append("USER GEOMETRY HEALTHY: Power users maintain distinct spatial representations without collapsing into a dense cluster.")
+    
+        # Rule 3: Alignment Quality (Are users near their ground truth items?)
+        # Distance of 2.0 is perfectly orthogonal (random). < 1.0 is good alignment.
+        avg_alignment = np.mean([agg_res[f"user_tier_{i}"]["alignment"] for i in range(3)])
+        if avg_alignment > 1.5:
+            conclusions.append(f"POOR ALIGNMENT: Average positive pair distance is {avg_alignment:.2f} (Max is 4.0). User embeddings are struggling to map closely to their interacted items.")
+        elif avg_alignment < 0.5:
+            conclusions.append(f"OVERFIT WARNING: Average positive pair distance is {avg_alignment:.2f}. Alignment is extremely tight, which may indicate the model is memorizing exact pairs rather than generalizing.")
+        else:
+            conclusions.append(f"HEALTHY ALIGNMENT: Average positive pair distance is {avg_alignment:.2f}. Model balances proximity to positive items while maintaining generalization space.")
+    
+        agg_res["automated_conclusions"] = conclusions
+        
+        agg_res = self.convert_to_native_types(agg_res)
+        print(f"Embedding Hubness:\n", json.dumps(agg_res, indent=4))
+        
+        with open(output_file_path, "w") as f:
+            json.dump(agg_res, f, indent=4)
+    
+    def test_plot_tsne_umap_movie_embeddings(self):
         
         outdir = os.path.join(get_bin_dir(), "embedding_plots")
         shutil.rmtree(outdir, ignore_errors=True)
@@ -322,6 +675,20 @@ class TestAnalysis(unittest.TestCase):
         
         with open(output_file_path, "w") as f:
             json.dump(res, f, indent=4)
+    
+    def convert_to_native_types(self, obj):
+        """Recursively converts NumPy types to native Python types for JSON serialization."""
+        if isinstance(obj, dict):
+            return {str(k): self.convert_to_native_types(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self.convert_to_native_types(v) for v in obj]
+        elif isinstance(obj, (np.float32, np.float64, np.floating)):
+            return float(obj)
+        elif isinstance(obj, (np.int32, np.int64, np.integer)):
+            return int(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
     
     def evaluate_popularity_bias(self,
             neighbors: np.ndarray,  # shape: (n_users, top_k)
@@ -1139,7 +1506,8 @@ class TestAnalysis(unittest.TestCase):
         inputs = self.movie_data.get_movie(movie_ids)
         return self._create_movie_embeddings_batch(inputs)
     
-    def create_user_embeddings_batch(self, user_ids: Union[tf.Tensor, np.ndarray], timestamps:Union[tf.Tensor, np.ndarray]):
+    def create_user_embeddings_batch(self, user_ids: Union[tf.Tensor, np.ndarray],
+            timestamps:Union[tf.Tensor, np.ndarray]) -> tf.Tensor:
         """
         inputs = \
             {'user_id': tf.constant([[1], [2], [3]], dtype=tf.int64),
@@ -1284,6 +1652,45 @@ class TestAnalysis(unittest.TestCase):
         embeddings: tf.Tensor = self._create_movie_embeddings_batch(inputs)
         
         return movie_ids, embeddings
+    
+    def plot_lorenz_curve(self, lorenz_array, top_k, gini_score, out_file_path):
+        """Plots the Lorenz curve of recommendation distribution."""
+        if not lorenz_array:
+            print("No Lorenz data to plot.")
+            return
+        
+        sns.set_theme(style="whitegrid")
+        plt.figure(figsize=(8, 6))
+        
+        # Anchor the curve at (0,0)
+        x_vals = [0] + list(range(1, 101))
+        y_vals = [0.0] + lorenz_array
+        
+        # Line of Perfect Equality (y = x)
+        perfect_equality = [x / 100.0 for x in x_vals]
+        plt.plot(x_vals, perfect_equality, linestyle='--', color='gray',
+            label='Perfect Equality (Gini=0.0)')
+        
+        # Model's Lorenz Curve
+        plt.plot(x_vals, y_vals, color='darkblue', linewidth=2.5,
+            label=f'Model @ k={top_k} (Gini={gini_score:.2f})')
+        
+        # Shade the Gini Area
+        plt.fill_between(x_vals, perfect_equality, y_vals, color='darkblue',
+            alpha=0.1)
+        
+        plt.title(f"Catalog Recommendation Inequality (k={top_k})",
+            fontsize=14, pad=15)
+        plt.xlabel(                                                                                                                                       "Cumulative % of Movie Catalog (Least to Most Popular)",
+            fontsize=11)
+        plt.ylabel("Cumulative % of Recommendation Slots", fontsize=11)
+        plt.xlim(0, 100)
+        plt.ylim(0, 1.0)
+        plt.legend(loc="upper left")
+        plt.tight_layout()
+        
+        plt.savefig(out_file_path, dpi=300, bbox_inches="tight")
+        plt.close()
 
 if __name__ == '__main__':
     unittest.main()

@@ -135,3 +135,21 @@ def get_random_user_and_first_timestamp_from_ratings(
     
     return user_ids, timestamps
 
+
+def get_user_and_first_timestamp_from_ratings(
+        ratings_df: pl.DataFrame
+) -> tuple[ndarray, ndarray]:
+    """
+    Extracts a random sample of unique users and their first timestamp from a Polars DataFrame.
+    """
+    unique_users_df = (
+        ratings_df
+        .group_by("user_id")
+        .agg(pl.col("timestamp").min().alias("timestamp"))
+    )
+    
+    user_ids = unique_users_df["user_id"].to_numpy()
+    timestamps = unique_users_df["timestamp"].to_numpy()
+    
+    return user_ids, timestamps
+

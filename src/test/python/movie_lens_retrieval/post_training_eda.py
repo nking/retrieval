@@ -102,6 +102,44 @@ class TestAnalysis(unittest.TestCase):
         
         self.max_k = 20
     
+    def test_popularity_bias(self):
+        ## a.k.a. Macroscopic Amplification
+        
+        output_file_path = os.path.join(get_bin_dir(), "popularity_bias.json")
+
+        top_k = 100
+        
+        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
+        
+        unique_users_df = pos_test_df.group_by("user_id").agg(pl.col("timestamp").min().alias("timestamp"))
+        user_ids = unique_users_df["user_id"].to_numpy()
+        timestamps = unique_users_df["timestamp"].to_numpy()
+        user_ids = np.expand_dims(user_ids, axis=1)
+        timestamps = np.expand_dims(timestamps, axis=1)
+        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
+        
+        full_movie_ids, full_movie_embeddings = self.read_movie_embeddings()
+        indexer = Retriever.build_scann_searcher(embeddings=full_movie_embeddings, top_k=top_k)
+        
+        # neighbors shape is (n_samples, top_k).  these are both np.ndarray
+        neighbors, distances = indexer.search_batched(user_embeddings)
+        #chk = full_movie_ids[neighbors]
+        neighbors += self.MOVIE_OFFSET
+        #are_equal = np.array_equal(chk, neighbors)
+        
+        history_df = self.get_positive_ratings_history()
+        
+        res = self.evaluate_popularity_bias(
+            neighbors=neighbors,  # shape: (n_users, top_k)
+            ground_truth_df=pos_test_df,  # Test set (positives only)
+            train_history_df = history_df,  # Train set (positives only)
+            top_k = top_k)
+        
+        print("popularity bias\n", json.dumps(res, indent=4))
+        
+        with open(output_file_path, "w") as f:
+            json.dump(res, f, indent=4)
+    
     def test_plot_movie_embeddings(self):
         
         emb_movies_df = self.read_embeddings_to_polars(self.movie_emb_path, self.emb_movie_feature_spec)
@@ -245,8 +283,106 @@ class TestAnalysis(unittest.TestCase):
         
         with open(output_file_path, "w") as f:
             json.dump(res, f, indent=4)
-
-
+    
+    def evaluate_popularity_bias(self,
+            neighbors: np.ndarray,  # shape: (n_users, top_k)
+            ground_truth_df: pl.DataFrame,  # Test set (positives only)
+            train_history_df: pl.DataFrame,  # Train set (positives only)
+            top_k: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Measures Macroscopic Amplification (Popularity Bias) by comparing the
+        popularity of retrieved slates vs. what the user naturally consumes.
+        """
+        # movie_count_map: calc movie_id count on history positive datasets.
+        #     movie popularity follows a power-law (Zipfian) distribution.
+        #     A blockbuster might have 5,000 positive interactions, while a niche movie has 5.
+        #     So, the popularity counts are log transformed before averaging:
+        #        log_pop(i) = log_2(1 + count(i))
+        # for each user
+        #      retrieved list:
+        #          user_retr_avg = sum (movie_count_map[retr_movie_id]) / len(retr_movie_ids)
+        #      test positive list:
+        #          user_gt_avg = sum (movie_count_map[gt_movie_id]) / len(gt_movie_ids)
+        #      popularity bias : if user_retr_avg is consistently > user_gt_avg
+        # Build the Log-Popularity Map from Historical Training Data
+        # Calculate log2(1 + count) for every movie
+        pop_df = (train_history_df.group_by("movie_id")
+            .agg(pl.len().alias("raw_count"))
+            .with_columns(
+                pl.col("raw_count").map_elements(lambda x: np.log2(1 + x),
+                    return_dtype=pl.Float64).alias("log_pop")
+            )
+        )
+        
+        # Create a fast dictionary mapping movie_id -> log_pop
+        # Default to 0.0 for items with no historical positives (pure cold-start)
+        pop_map = dict(pop_df.select(["movie_id", "log_pop"]).iter_rows())
+        
+        n_users = neighbors.shape[0]
+        user_retr_pop = []
+        # Calculate Average Log-Popularity for Retrieved Slates
+        for i in range(n_users):
+            slate = neighbors[i, :top_k]
+            slate_pops = [pop_map.get(m_id, 0.0) for m_id in slate]
+            user_retr_pop.append(np.mean(slate_pops))
+        user_retr_pop = np.array(user_retr_pop)
+        
+        # Calculate Average Log-Popularity for Ground Truth Test Items
+        # Group the test DataFrame by user_id
+        gt_grouped = (
+            ground_truth_df
+            .group_by("user_id")
+            .agg(pl.col("movie_id").alias("gt_movies"))
+        )
+        
+        user_gt_pop = []
+        for row in gt_grouped.iter_rows():
+            gt_movies = row[1]
+            gt_pops = [pop_map.get(m_id, 0.0) for m_id in gt_movies]
+            user_gt_pop.append(np.mean(gt_pops))
+        user_gt_pop = np.array(user_gt_pop)
+        
+        # Compute Bias Metrics
+        mean_retr_pop = float(np.mean(user_retr_pop))
+        mean_gt_pop = float(np.mean(user_gt_pop))
+        
+        delta_pop = float(np.mean(user_retr_pop - user_gt_pop))
+        std_delta_pop = float(np.std(user_retr_pop - user_gt_pop))
+        
+        # Amplification Ratio (Retrieved / Ground Truth)
+        amplification_ratio = mean_retr_pop / max(1e-9, mean_gt_pop)
+        
+        # Automated Text Interpretation
+        conclusions = []
+        if amplification_ratio > 1.15:
+            conclusions.append(
+                f"[HIGH POPULARITY BIAS]: Model amplifies popularity by {amplification_ratio:.2f}x. "
+                f"Retrieved slates (LogPop: {mean_retr_pop:.2f}) are significantly more popular "
+                f"than the users' natural test consumption (LogPop: {mean_gt_pop:.2f})."
+            )
+        elif amplification_ratio < 0.85:
+            conclusions.append(
+                f"[NICHE BIAS]: Model suppresses popularity by {amplification_ratio:.2f}x. "
+                f"Retrieved slates are pushing much more obscure items than the user normally consumes."
+            )
+        else:
+            conclusions.append(
+                f"[NEUTRAL POPULARITY]: Model preserves user consumption habits (Ratio: {amplification_ratio:.2f}x). "
+                f"Retrieved item popularity aligns closely with ground truth behavior."
+            )
+        
+        return {
+            "metrics": {
+                "mean_retrieved_log_pop": round(mean_retr_pop, 4),
+                "mean_ground_truth_log_pop": round(mean_gt_pop, 4),
+                "delta_log_pop": round(delta_pop, 4),
+                "std_delta_log_pop": round(std_delta_pop, 4),
+                "amplification_ratio": round(amplification_ratio, 4)
+            },
+            "analysis": conclusions
+        }
+    
     def get_user_tiers(self) -> Dict[int, int]:
         out = {}
         for file_path in self.ratings_dict["positive_history"]:
@@ -1131,6 +1267,12 @@ class TestAnalysis(unittest.TestCase):
         full_movie_embeddings = np.concatenate(full_movie_embeddings, axis=0)
         return (full_movie_ids, full_movie_embeddings)
 
+    def get_positive_ratings_history(self) -> pl.DataFrame:
+        r = []
+        for file_path in self.ratings_dict["positive_history"]:
+            ratings_df = self.read_ratings_to_df(file_path)
+            r.append(ratings_df)
+        return pl.concat(r)
 
 if __name__ == '__main__':
     unittest.main()

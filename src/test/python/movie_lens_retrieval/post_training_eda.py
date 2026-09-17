@@ -122,8 +122,8 @@ class TestAnalysis(unittest.TestCase):
         agg_res = dict()
         
         # random sample of all users
-        # random sample of statified tier users
-        # random sample of all users but catalog exanded to include cold-start metrics
+        # random sample of stratified tier users
+        # random sample of all users but catalog expanded to include cold-start metrics
         
         n_samples = 500
         
@@ -182,7 +182,33 @@ class TestAnalysis(unittest.TestCase):
             )
             
             agg_res = agg_res | res
+            
+        # ===== cold start movies, adding 501 movies to the movie catalog (501 because its between 10-15% of catalog size and is 167 per movie tier) =====
+        (new_movie_ids, new_movie_embeddings) = self.get_cold_start_movies(pos_test_df)
+        full_movie_embeddings = tf.concat([movie_embeddings, new_movie_embeddings], axis=0)
+        indexer = Retriever.build_scann_searcher(embeddings=full_movie_embeddings, top_k=top_k)
         
+        num_catalog_movies += len(new_movie_ids)
+        
+        (user_ids, timestamps) = get_random_user_and_first_timestamp_from_ratings(pos_test_df, n_samples)
+        user_ids = np.expand_dims(user_ids, axis=1)
+        timestamps = np.expand_dims(timestamps, axis=1)
+        
+        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)  # tf.Tensor shape (5096, 32)
+        
+        # neighbors shape is (n_samples, top_k)
+        neighbors, distances = indexer.search_batched(user_embeddings)
+        
+        inter_user_diversity, mean_jaccard = self.calculate_exact_inter_user_diversity(
+            neighbors, num_catalog_movies
+        )
+        
+        res = self.analyze_inter_user_diversity(mean_jaccard,
+            num_catalog_movies, top_k, "all_users_but_catalog_has_cold_start_movies",
+            baseline_jaccard=None
+        )
+        
+        agg_res = agg_res | res
         
         print("inter_user_diversity\n", json.dumps(agg_res, indent=4))
         
@@ -561,6 +587,37 @@ class TestAnalysis(unittest.TestCase):
             "diversity_ratio": round(diversity_ratio, 4),
             "analysis": analysis
         }
+    
+    def get_cold_start_movies(self, pos_test_df: pl.DataFrame) -> Tuple[tf.Tensor, tf.Tensor]:
+        
+        pos_test_df = self.join_df_to_movie_tiers(pos_test_df)
+        movie_test_counts = pos_test_df.group_by("movie_id").agg(pl.len().alias("test_interaction_count"))
+        candidate_pool = movie_test_counts.filter(pl.col("test_interaction_count") >= 5)
+        
+        pos_test_df = candidate_pool.join(pos_test_df, on="movie_id", how="left")
+        
+        num_per_tier = 167  # total = 501
+        candidate_pool_df = (pos_test_df.sample(fraction=1.0, seed=42, shuffle=True)
+            .group_by("tier").head(num_per_tier))
+        
+        original_movie_ids = candidate_pool_df["movie_id"].unique().to_numpy()
+        
+        id0 = self.movie_id_range_incl[-1] + 1
+        new_movie_ids = np.array([i for i in range(id0, id0 + len(original_movie_ids))])
+        
+        original_movie_ids = np.expand_dims(original_movie_ids, axis=1)
+        new_movie_ids = np.expand_dims(new_movie_ids, axis=1)
+        
+        original_inputs = self.movie_data.get_movie(original_movie_ids)
+        new_inputs = original_inputs.copy()
+        new_inputs["movie_id"] = tf.constant(new_movie_ids)
+        
+        # original_embeddings : tf.Tensor = self._create_movie_embeddings_batch(original_inputs)
+        new_embeddings: tf.Tensor = self._create_movie_embeddings_batch(new_inputs)
+        
+        new_movie_ids = tf.convert_to_tensor(new_movie_ids, dtype=tf.int32)
+        
+        return (new_movie_ids, new_embeddings)
     
     def simulate_cold_start_embeddings(self):
         '''

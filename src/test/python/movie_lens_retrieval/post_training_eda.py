@@ -111,7 +111,135 @@ class TestAnalysis(unittest.TestCase):
         self.movie_indexer : ScannSearcher = Retriever.build_scann_searcher(embeddings=self.movie_catalog_embeddings,
             top_k=self.top_k)
 
-    
+    def test_stratified_metrics(self):
+        
+        output_file_path = os.path.join(get_bin_dir(), "stratified_metrics.json")
+        
+        top_k = self.top_k
+        
+        catalog_size = self.model_dict['n_movies']
+        
+        expected_random_recall = float(top_k)/float(catalog_size)
+        
+        #expected DCG@K = (N/C) * sum_{r=1,K}(1/log_2(r+1)) where N is the user's number of ground truth ratings and D is catalog size
+        expected_random_dcg_part1 = sum([(1./np.log2(r + 1.)) for r in range(1, top_k+1)])/float(catalog_size)
+        
+        # ground truth: user_id, movie_id, rating, timestamp
+        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
+        user_ids, timestamps = get_user_and_first_timestamp_from_ratings(pos_test_df)
+        user_ids = np.expand_dims(user_ids, axis=1)
+        timestamps = np.expand_dims(timestamps, axis=1)
+        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
+        
+        neighbors, distances = self.movie_indexer.search_batched(user_embeddings)
+        neighbors += self.MOVIE_OFFSET
+        
+        retrieval_df = pl.DataFrame({
+            "user_id": user_ids.squeeze(),
+            "movie_id": neighbors  # shape (n_users, top_k)
+        }).explode("movie_id")
+        #height: (n_users * top_k)  where n_users=user_ids.len() where user_ids are the unique users in pos_test_df below
+        
+        #rank the movie_ids for each user:
+        retrieval_df = retrieval_df.with_columns(
+            pl.int_range(1, pl.len() + 1).over("user_id").alias("rank")
+        )
+        
+        user_pos_counts = pos_test_df.group_by("user_id").agg(
+            pl.len().alias("total_positives")
+        )
+        
+        #HITS: for each user, count the intersection of user_id, movie_id in retrieval_df with pos_test_df, user_id, movie_id
+        
+        retrieval_df = retrieval_df.join(pos_test_df, on=["user_id", "movie_id"], how="left")
+        
+        metrics_df = retrieval_df.group_by("user_id").agg(
+            pl.col("rating").is_not_null().sum().alias("hits_at_k"),
+            (1.0 / (pl.col("rank").filter(pl.col("rating").is_not_null()) + 1.0).log(2)).sum().alias("dcg_at_k")
+        )
+        
+        # add column "user_tier":
+        metrics_df = metrics_df.join(self.user_tiers_df, on="user_id", how="left")
+        
+        #Calculate Native IDCG, NDCG, and Baselines
+        metrics_df = metrics_df.join(user_pos_counts, on="user_id", how="inner").with_columns(
+            # Native Polars IDCG: Generates [1, 2, ..., min(positives, K)], applies discount, and sums.
+            # This ports 1:1 to Rust.
+            pl.int_ranges(1, pl.min_horizontal(pl.col("total_positives"), pl.lit(top_k)) + 1)
+              .list.eval(1.0 / (pl.element() + 1.0).log(2))
+              .list.sum()
+              .alias("idcg_at_k")
+        ).with_columns(
+            # Model Metrics
+            (pl.col("hits_at_k") / pl.col("total_positives")).alias("recall_at_k"),
+            (pl.col("dcg_at_k") / pl.col("idcg_at_k")).fill_nan(0.0).alias("ndcg_at_k"),
+            
+            # Expected Random Baselines
+            pl.lit(expected_random_recall).alias("expected_random_recall_at_k"),
+            (pl.col("total_positives") * expected_random_dcg_part1 / pl.col("idcg_at_k")).alias("expected_random_ndcg_at_k")
+        )
+        
+        agg_res = dict()
+        
+        res = {
+            f"mean_recall_at_{top_k}" : metrics_df.select(pl.col("recall_at_k")).mean().item(),
+            f"mean_ndcg_at_{top_k}" : metrics_df.select(pl.col("ndcg_at_k")).mean().item(),
+            f"mean_random_recall_at_{top_k}" : metrics_df.select(pl.col("expected_random_recall_at_k")).mean().item(),
+            f"mean_random_ndcg_at_{top_k}" : metrics_df.select(pl.col("expected_random_ndcg_at_k")).mean().item()
+        }
+        
+        agg_res = agg_res | res
+        
+        for user_tier in (0,1,2):
+            df = metrics_df.filter(pl.col("user_tier") == user_tier)
+            res = {
+                f"user_tier_{user_tier}_mean_recall_at_{top_k}" : df.select(pl.col("recall_at_k")).mean().item(),
+                f"user_tier_{user_tier}_mean_ndcg_at_{top_k}" : df.select(pl.col("ndcg_at_k")).mean().item(),
+            }
+            agg_res = agg_res | res
+        
+        # ====== conclusions ==========
+        conclusions = []
+        
+        global_recall = agg_res[f"mean_recall_at_{top_k}"]
+        random_recall = agg_res[f"mean_random_recall_at_{top_k}"]
+        
+        # Baseline Performance Lift
+        if global_recall > random_recall * 3:
+            conclusions.append(f"STRONG BASELINE LIFT: Global Recall@{top_k} ({global_recall:.1%}) heavily outperforms the random expected baseline ({random_recall:.1%}). The candidate generator is extracting meaningful semantic signal.")
+        elif global_recall > random_recall:
+            conclusions.append(f"MODERATE BASELINE LIFT: Global Recall@{top_k} ({global_recall:.1%}) beats the random baseline ({random_recall:.1%}), but there is room for improvement.")
+        else:
+            conclusions.append(
+                "BASELINE FAILURE: The model fails to outperform a random candidate generator.")
+        
+        # Cohort History Utilization (Recall Trend)
+        recall_t0 = agg_res[f"user_tier_0_mean_recall_at_{top_k}"]
+        recall_t2 = agg_res[f"user_tier_2_mean_recall_at_{top_k}"]
+        
+        if recall_t2 > recall_t0 * 1.5:
+            conclusions.append(f"EXCELLENT HISTORY UTILIZATION: Power users (Tier 2 Recall: {recall_t2:.1%}) perform massively better than light users (Tier 0 Recall: {recall_t0:.1%}). The model successfully translates rich interaction histories into highly relevant slates.")
+        elif recall_t2 > recall_t0:
+            conclusions.append(f"MODERATE HISTORY UTILIZATION: Power users see slightly better recall than light users.")
+        else:
+            conclusions.append(f"HISTORY NEGLECT WARNING: Power users perform worse or equal to light users, indicating the model struggles to parse dense interaction histories.")
+        
+        #NDCG (Ranking Quality)
+        ndcg_t0 = agg_res[f"user_tier_0_mean_ndcg_at_{top_k}"]
+        ndcg_t2 = agg_res[f"user_tier_2_mean_ndcg_at_{top_k}"]
+        
+        if ndcg_t2 > ndcg_t0:
+            conclusions.append(f"HEALTHY RANKING STRATIFICATION: NDCG scales positively with user tier (Tier 2: {ndcg_t2:.2%} vs Tier 0: {ndcg_t0:.2%}). The model not only retrieves the right items for power users but places them higher in the slate.")
+        else:
+            conclusions.append("POOR RANKING STRATIFICATION: NDCG does not improve for power users, suggesting the model retrieves relevant items but places them randomly within the top K.")
+        
+        agg_res["automated_conclusions"] = conclusions
+        
+        print(f'metrics\n={json.dumps(agg_res, indent=4)}')
+        
+        with open(output_file_path, "w") as f:
+            json.dump(agg_res, f, indent=4)
+        
     def test_coverage(self):
         """
         calculating item coverage as the number of unique movie ids recommended to users / size of movie catalog,
@@ -369,8 +497,6 @@ class TestAnalysis(unittest.TestCase):
         with open(output_file_path, "w") as f:
             json.dump(agg_res, f, indent=4)
             
-        pass
-    
     def test_popularity_bias(self):
         ## a.k.a. Macroscopic Amplification
         

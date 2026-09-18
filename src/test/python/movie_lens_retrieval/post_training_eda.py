@@ -67,6 +67,8 @@ class TestAnalysis(unittest.TestCase):
                     os.path.join(test_res_dir, "ratings_val_liked.array_record")
                 ],
             "positive_train": os.path.join(test_res_dir, "ratings_train_liked.array_record"),
+            "positive_val": os.path.join(test_res_dir,
+                "ratings_val_liked.array_record"),
             "positive_test": os.path.join(test_res_dir, "ratings_test_liked.array_record"),
         }
         
@@ -110,6 +112,121 @@ class TestAnalysis(unittest.TestCase):
         
         self.movie_indexer : ScannSearcher = Retriever.build_scann_searcher(embeddings=self.movie_catalog_embeddings,
             top_k=self.top_k)
+
+    def test_data_shifts(self):
+        output_file_path = os.path.join(get_bin_dir(), "tier_counts.json")
+        
+        res = dict()
+        
+        movie_counts = [self.movie_tiers_df.select(pl.col("movie_tier").eq(t).sum()).item() for t in range(3)]
+        movie_fracs = self.normalize(movie_counts).tolist()
+        for movie_tier in (0, 1, 2):
+            res[f"movie_tier_{movie_tier}_catalog_counts"] = movie_counts[movie_tier]
+            
+        res["movie_tier_catalog_distribution"] = movie_fracs
+        
+        # fraction of positive train, val, and test that are movie_tier
+        for name in ["train", "val", "test"]:
+            df = self.read_ratings_to_df(self.ratings_dict[f'positive_{name}'])
+            df = df.join(self.movie_tiers_df, on="movie_id", how="left")
+            
+            movie_counts = [df.select(pl.col("movie_tier").eq(t).sum()).item() for t in range(3)]
+            movie_fracs = self.normalize(movie_counts).tolist()
+            for movie_tier in (0, 1, 2):
+                res[f"movie_tier_{movie_tier}_{name}_counts"] = movie_counts[movie_tier]
+        
+            df = df.join(self.user_tiers_df, on="user_id", how="left")
+            user_counts = [df.select(pl.col("user_tier").eq(t).sum()).item() for t in range(3)]
+            user_fracs = self.normalize(user_counts).tolist()
+            for user_tier in (0, 1, 2):
+                res[f"user_tier_{user_tier}_{name}_counts"] = user_counts[user_tier]
+            
+            res[f"movie_tier_{name}_distribution"] = movie_fracs
+            res[f"user_tier_{name}_distribution"] = user_fracs
+        
+        #compare the data distributions.
+        # because the tiers are ordinal, we can use the Wasserstein distance (a.k.a. Earth Mover's Distance)
+        # EMDs will be in range [0,1]
+        #    where 0 is no difference
+        #          1 is polar opposite piling of mass in the distributions
+        
+        # Pairwise Movie Tier EMDs
+        movie_pairs = [
+            ("train", "val"),
+            ("val", "test"),
+            ("train", "test"),
+            ("catalog", "train"),
+        ]
+        for name_a, name_b in movie_pairs:
+            p = res[f"movie_tier_{name_a}_distribution"]
+            q = res[f"movie_tier_{name_b}_distribution"]
+            res[f"movie_tier_emd_{name_a}_to_{name_b}"] = self.calc_earth_mover_distances(p, q)
+        
+        user_pairs = [("train", "val"), ("val", "test"), ("train", "test")]
+        
+        for name_a, name_b in user_pairs:
+            p = res[f"user_tier_{name_a}_distribution"]
+            q = res[f"user_tier_{name_b}_distribution"]
+            res[f"user_tier_emd_{name_a}_to_{name_b}"] = self.calc_earth_mover_distances(p, q)
+        
+        conclusions = []
+        m_train_to_val = res[f'movie_tier_emd_train_to_val']
+        m_train_to_test = res[f'movie_tier_emd_train_to_test']
+        u_train_to_val = res[f'user_tier_emd_train_to_val']
+        u_train_to_test = res[f'user_tier_emd_train_to_test']
+        
+        # Rule 1: Movie Tier Split Drift (Train vs Val/Test)
+        max_m_split_drift = max(m_train_to_val, m_train_to_test)
+        if max_m_split_drift < 0.015:
+            conclusions.append(
+                f"MOVIE TIER STABILITY EXCELLENT: Minimal drift across dataset splits (Train-Test EMD: "
+                f"{m_train_to_test:.4f}). Popularity profile is well-balanced across splits."
+            )
+        elif max_m_split_drift < 0.04:
+            conclusions.append(
+                f"MODERATE MOVIE TIER DRIFT: Slight popularity shift across splits (Train-Test EMD: "
+                f"{m_train_to_test:.4f}), typical for temporal evaluation splits."
+            )
+        else:
+            conclusions.append(
+                f"HIGH MOVIE TIER DRIFT WARNING: Significant item popularity shift between Train and Test splits (Train-Test EMD: "
+                f"{m_train_to_test:.4f}). Evaluation may be biased."
+            )
+        
+        # Rule 2: User Tier Split Drift (Train vs Val/Test)
+        max_u_split_drift = max(u_train_to_val, u_train_to_test)
+        if max_u_split_drift < 0.015:
+            conclusions.append(
+                f"USER TIER STABILITY EXCELLENT: Activity profile distribution remains consistent across splits (Train-Test EMD: {u_train_to_test:.4f})."
+            )
+        elif max_u_split_drift < 0.04:
+            conclusions.append(
+                f"MODERATE USER TIER DRIFT: Mild activity profile shift between Train and Test (Train-Test EMD: {u_train_to_test:.4f})."
+            )
+        else:
+            conclusions.append(
+                f"HIGH USER TIER DRIFT WARNING: Power vs. light user ratio changes significantly in evaluation splits (Train-Test EMD: {u_train_to_test:.4f})."
+            )
+        
+        # Rule 3: Catalog Interaction Bias (Catalog vs Train)
+        cat_tr_emd = res[f'movie_tier_emd_catalog_to_train']
+        if cat_tr_emd > 0.025:
+            conclusions.append(
+                f"EXPECTED INTERACTION POPULARITY BIAS: Catalog vs. Train EMD is {cat_tr_emd:.4f}. Training interactions heavily concentrate on high-tier items relative to catalog availability."
+            )
+        else:
+            conclusions.append(
+                f"UNUSUAL UNIFORM CATALOG COVERAGE: Catalog vs. Train EMD is low ({cat_tr_emd:.4f}), indicating interactions are surprisingly evenly spread across all item tiers."
+            )
+        
+        res["automated_conclusions"] = conclusions
+        
+        #res = self.convert_to_native_types(res)
+        
+        print(f"Tier EMD Analysis:\n{json.dumps(res, indent=4)}")
+        
+        with open(output_file_path, "w") as f:
+            json.dump(res, f, indent=4)
 
     def test_stratified_metrics(self):
         
@@ -816,6 +933,25 @@ class TestAnalysis(unittest.TestCase):
             return obj.tolist()
         return obj
     
+    def calc_earth_mover_distances(self, distr_0, distr_1):
+        """
+        calculate normalized earth moviers distance between these 2 1D, length 3 distributions.
+        Values returend wll be in range [0,1], inclusive
+        :param distr_0:
+        :param distr_1:
+        :return: the normalized earth moviers distance between distr_0 and distr_1
+        """
+        if np.shape(distr_0) != (3,) or np.shape(distr_1) != (3,):
+            raise ValueError(f"distr_0 and distr_1 must have shape (3,).  found {np.shape(distr_0)} and {np.shape(distr_1)}")
+        """
+        # for 1D and 3 bins, the EMD simplifies to the sum ob absolute differences of their CDFs
+        # EMD(P,Q) = sum_{i=0, K-1}( |CDF_P(i) - CDF_Q(i)| )
+        """
+        cdf_0 = np.cumsum(distr_0)
+        cdf_1 = np.cumsum(distr_1)
+        max_emd = 2.0
+        return float(np.sum(np.abs(cdf_0 - cdf_1)))/max_emd
+    
     def evaluate_popularity_bias(self,
             neighbors: np.ndarray,  # shape: (n_users, top_k)
             ground_truth_df: pl.DataFrame,  # Test set (positives only)
@@ -915,7 +1051,10 @@ class TestAnalysis(unittest.TestCase):
             },
             f"{tag}_analysis": conclusions
         }
-        
+    
+    def normalize(self, a: list):
+        return np.array(a) / float(sum(a))
+    
     def analyze_inter_user_diversity(self,
             mean_jaccard: float,
             num_catalog_movies: int,

@@ -38,9 +38,13 @@ class TestAnalysis(unittest.TestCase):
         
         self.top_k = 100
         
-        saved_models_dir = os.path.join(get_project_dir(),
-            "src/main/resources/serving_models")
+        saved_models_dir = os.path.join(get_project_dir(), "src/main/resources/serving_models")
         self.user_movie_models_dir = os.path.join(saved_models_dir, "user_movie_model")
+        
+        #temporary change to check latest model
+        saved_models_dir = os.path.join(get_project_dir(), "../TMP3/bin/rs_pipeline/Pusher/pushed_model")
+        self.user_movie_models_dir = os.path.join(saved_models_dir, "21")
+        self.assertTrue(os.path.exists(self.user_movie_models_dir))
         
         test_res_dir = os.path.join(get_project_dir(), "src/test/resources/data")
         
@@ -112,9 +116,11 @@ class TestAnalysis(unittest.TestCase):
         
         self.movie_indexer : ScannSearcher = Retriever.build_scann_searcher(embeddings=self.movie_catalog_embeddings,
             top_k=self.top_k)
+        
+        self.output_dir = os.path.join(get_bin_dir(), "post_training_analysis")
 
     def test_data_shifts(self):
-        output_file_path = os.path.join(get_bin_dir(), "tier_counts.json")
+        output_file_path = os.path.join(self.output_dir, "data_shifts.json")
         
         res = dict()
         
@@ -230,7 +236,7 @@ class TestAnalysis(unittest.TestCase):
 
     def test_stratified_metrics(self):
         
-        output_file_path = os.path.join(get_bin_dir(), "stratified_metrics.json")
+        output_file_path = os.path.join(self.output_dir, "stratified_metrics.json")
         
         top_k = self.top_k
         
@@ -363,7 +369,7 @@ class TestAnalysis(unittest.TestCase):
         then stratifying the results by movie_tier and user_tier.
         :return:
         """
-        out_dir = os.path.join(get_bin_dir(), "coverage")
+        out_dir = os.path.join(self.output_dir, "coverage")
         shutil.rmtree(out_dir, ignore_errors=True)
         os.makedirs(out_dir, exist_ok=True)
         
@@ -617,7 +623,7 @@ class TestAnalysis(unittest.TestCase):
     def test_popularity_bias(self):
         ## a.k.a. Macroscopic Amplification
         
-        output_file_path = os.path.join(get_bin_dir(), "popularity_bias.json")
+        output_file_path = os.path.join(self.output_dir, "popularity_bias.json")
         
         agg_res = dict()
         
@@ -669,7 +675,7 @@ class TestAnalysis(unittest.TestCase):
     
     def test_embedding_hubness(self):
         
-        output_file_path = os.path.join(get_bin_dir(), "embedding_hubness.json")
+        output_file_path = os.path.join(self.output_dir, "embedding_hubness.json")
         
         agg_res = dict()
         
@@ -771,7 +777,7 @@ class TestAnalysis(unittest.TestCase):
     
     def test_plot_tsne_umap_movie_embeddings(self):
         
-        outdir = os.path.join(get_bin_dir(), "embedding_plots")
+        outdir = os.path.join(self.output_dir, "embedding_plots")
         shutil.rmtree(outdir, ignore_errors=True)
         os.makedirs(outdir, exist_ok=True)
        
@@ -789,12 +795,9 @@ class TestAnalysis(unittest.TestCase):
         self.plot_embeddings_umap_tsne(emb_movies_df, outdir, "all_movies",
             stratified_key="movie_tier")
         
-    def test_cold_start_distance(self):
-        self.simulate_cold_start_embeddings()
-        
     def test_inter_list_diversity(self):
         
-        output_file_path = os.path.join(get_bin_dir(), "interlist_diversity.json")
+        output_file_path = os.path.join(self.output_dir, "interlist_diversity.json")
         
         agg_res = dict()
         
@@ -895,7 +898,7 @@ class TestAnalysis(unittest.TestCase):
     
     def test_intra_list_diversity(self):
         
-        output_file_path = os.path.join(get_bin_dir(), "intralist_diversity.json")
+        output_file_path = os.path.join(self.output_dir, "intralist_diversity.json")
 
         agg_res = dict()
         
@@ -919,6 +922,109 @@ class TestAnalysis(unittest.TestCase):
         with open(output_file_path, "w") as f:
             json.dump(res, f, indent=4)
     
+    def test_simulate_cold_start_embeddings(self):
+        '''
+        
+        :return:
+        '''
+        """
+        from the positive test dataset,
+           candidate_pool: select unique movie ids for which there are at least 5-10 unique user_ids
+           original_movie_ids : from candidate_pool_movies_users, choose 167 randomly from the movie_tier=0 partition, movie_tier=1 partition and movie_tier=2 partition.
+           original_genres : the genres from original_movie_ids
+           new_movie_ids : start numbering at self.movie_id_range_incl[-1] + 1
+           original_embeddings: get the embeddings for original_movie_ids
+           new_embeddings: create movie embeddings for (new_movie_ids, original_genres)
+           original_scann_indexer : create ScANN index for all movies, including original_embeddings
+           new_scann_indexer : create ScANN index for all movies, excluding original_embeddings, including new_embeddings.
+           
+           from users in candidate_pool_movies_users:
+               - original_retrieval: get retrieval from original_scann_indexer.
+                   are the original_movie_ids found?
+                   - calc recall@k for each movie tier
+               - new_retrieval: get retrieval from new_scann_indexer.
+                   are the new_movie_ids found in same fractional amount as original_retrieval?
+                   - calc recall@k for each movie tier
+                   
+          If your Recall@K plummets for these dropped-out items, your model relies too heavily
+          on interaction IDs and has weak content representations.
+        """
+        output_file_path = os.path.join(self.output_dir, "cold-start-recalls.json")
+        
+        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
+        #[user_id, movie_id, rating, timestamp, movie_tier]
+        pos_test_df = self.join_df_to_movie_tiers(pos_test_df)
+        
+        movie_test_counts = pos_test_df.group_by("movie_id").agg(pl.len().alias("test_interaction_count"))
+        candidate_pool = movie_test_counts.filter(pl.col("test_interaction_count") >= 5)
+        
+        pos_test_df = candidate_pool.join(pos_test_df, on="movie_id", how="left")
+        
+        num_per_tier = 167 #total = 501
+        candidate_pool_df = (pos_test_df
+            .sample(fraction=1.0, seed=42, shuffle=True)
+            # Group by tier and take the top N from each group
+            .group_by("movie_tier").head(num_per_tier)
+        )
+        #height=351
+        
+        #len=290
+        original_movie_ids = candidate_pool_df["movie_id"].unique().to_numpy()
+        
+        #extract the unique users and their first timestamps. needed for user_embeddings input query
+        first_interactions_df = candidate_pool_df.group_by("user_id").agg(pl.col("timestamp").min())
+        user_ids = first_interactions_df["user_id"].to_numpy()
+        user_ids = np.expand_dims(user_ids, axis=1)
+        timestamps = first_interactions_df["timestamp"].to_numpy()
+        timestamps = np.expand_dims(timestamps, axis=1)
+        
+        id0 = self.movie_id_range_incl[-1] + 1
+        new_movie_ids = np.array([i for i in range(id0, id0 + len(original_movie_ids))])
+        
+        original_movie_ids = np.expand_dims(original_movie_ids, axis=1)
+        new_movie_ids = np.expand_dims(new_movie_ids, axis=1)
+        
+        original_inputs = self.movie_data.get_movie(original_movie_ids)
+        new_inputs = original_inputs.copy()
+        new_inputs["movie_id"] = tf.constant(new_movie_ids)
+        
+        #original_embeddings : tf.Tensor = self._create_movie_embeddings_batch(original_inputs)
+        new_embeddings : tf.Tensor = self._create_movie_embeddings_batch(new_inputs)
+        new_embeddings = new_embeddings.numpy()
+        
+        full_movie_embeddings = self.movie_catalog_embeddings.numpy()
+        
+        #for each new_movie_ids, replace with embedding for new_movie_ids.
+        #this not only subtracts the old and inserts the new, but gives them the same index so that they
+        # are findable when compared to the ground truth ratings.
+        for i, m_id in enumerate(original_movie_ids):
+            idx = m_id[0] - self.MOVIE_OFFSET
+            assert(self.movie_ids[idx].numpy().item() == m_id[0])
+            full_movie_embeddings[idx] = new_embeddings[i]
+            
+        top_k = self.top_k
+        
+        new_indexer = Retriever.build_scann_searcher(embeddings=full_movie_embeddings, top_k=top_k)
+    
+        #retrieve
+        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
+        
+        orig_neighbors, orig_distances = self.movie_indexer.search_batched(user_embeddings)
+        new_neighbors, new_distances = new_indexer.search_batched(user_embeddings)
+        
+        orig_results = self.evaluate_retrieval_with_tier_share(user_ids, orig_neighbors, self.MOVIE_OFFSET, candidate_pool_df, self.movie_tiers_df, top_k=top_k)
+        new_results = self.evaluate_retrieval_with_tier_share(user_ids, new_neighbors, self.MOVIE_OFFSET, candidate_pool_df, self.movie_tiers_df, top_k=top_k)
+
+        print("results on test set:\n", json.dumps(orig_results, indent=4))
+        print("results on test set cold start:\n", json.dumps(new_results, indent=4))
+        
+        res = self.compare_retrieval_runs(orig_results, new_results, top_k, self.model_dict["n_movies"], "test set", "cold-start set")
+        print("comparisons:\n", json.dumps(res, indent=4))
+        
+        with open(output_file_path, "w") as f:
+            json.dump(res, f, indent=4)
+        
+        
     def convert_to_native_types(self, obj):
         """Recursively converts NumPy types to native Python types for JSON serialization."""
         if isinstance(obj, dict):
@@ -1418,108 +1524,6 @@ class TestAnalysis(unittest.TestCase):
         
         return (new_movie_ids, new_embeddings)
     
-    def simulate_cold_start_embeddings(self):
-        '''
-        
-        :return:
-        '''
-        """
-        from the positive test dataset,
-           candidate_pool: select unique movie ids for which there are at least 5-10 unique user_ids
-           original_movie_ids : from candidate_pool_movies_users, choose 167 randomly from the movie_tier=0 partition, movie_tier=1 partition and movie_tier=2 partition.
-           original_genres : the genres from original_movie_ids
-           new_movie_ids : start numbering at self.movie_id_range_incl[-1] + 1
-           original_embeddings: get the embeddings for original_movie_ids
-           new_embeddings: create movie embeddings for (new_movie_ids, original_genres)
-           original_scann_indexer : create ScANN index for all movies, including original_embeddings
-           new_scann_indexer : create ScANN index for all movies, excluding original_embeddings, including new_embeddings.
-           
-           from users in candidate_pool_movies_users:
-               - original_retrieval: get retrieval from original_scann_indexer.
-                   are the original_movie_ids found?
-                   - calc recall@k for each movie tier
-               - new_retrieval: get retrieval from new_scann_indexer.
-                   are the new_movie_ids found in same fractional amount as original_retrieval?
-                   - calc recall@k for each movie tier
-                   
-          If your Recall@K plummets for these dropped-out items, your model relies too heavily
-          on interaction IDs and has weak content representations.
-        """
-        output_file_path = os.path.join(get_bin_dir(), "cold-start-recalls.json")
-        
-        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
-        #[user_id, movie_id, rating, timestamp, movie_tier]
-        pos_test_df = self.join_df_to_movie_tiers(pos_test_df)
-        
-        movie_test_counts = pos_test_df.group_by("movie_id").agg(pl.len().alias("test_interaction_count"))
-        candidate_pool = movie_test_counts.filter(pl.col("test_interaction_count") >= 5)
-        
-        pos_test_df = candidate_pool.join(pos_test_df, on="movie_id", how="left")
-        
-        num_per_tier = 167 #total = 501
-        candidate_pool_df = (pos_test_df
-            .sample(fraction=1.0, seed=42, shuffle=True)
-            # Group by tier and take the top N from each group
-            .group_by("movie_tier").head(num_per_tier)
-        )
-        #height=351
-        
-        #len=290
-        original_movie_ids = candidate_pool_df["movie_id"].unique().to_numpy()
-        
-        #extract the unique users and their first timestamps. needed for user_embeddings input query
-        first_interactions_df = candidate_pool_df.group_by("user_id").agg(pl.col("timestamp").min())
-        user_ids = first_interactions_df["user_id"].to_numpy()
-        user_ids = np.expand_dims(user_ids, axis=1)
-        timestamps = first_interactions_df["timestamp"].to_numpy()
-        timestamps = np.expand_dims(timestamps, axis=1)
-        
-        id0 = self.movie_id_range_incl[-1] + 1
-        new_movie_ids = np.array([i for i in range(id0, id0 + len(original_movie_ids))])
-        
-        original_movie_ids = np.expand_dims(original_movie_ids, axis=1)
-        new_movie_ids = np.expand_dims(new_movie_ids, axis=1)
-        
-        original_inputs = self.movie_data.get_movie(original_movie_ids)
-        new_inputs = original_inputs.copy()
-        new_inputs["movie_id"] = tf.constant(new_movie_ids)
-        
-        #original_embeddings : tf.Tensor = self._create_movie_embeddings_batch(original_inputs)
-        new_embeddings : tf.Tensor = self._create_movie_embeddings_batch(new_inputs)
-        new_embeddings = new_embeddings.numpy()
-        
-        full_movie_embeddings = self.movie_catalog_embeddings.numpy()
-        
-        #for each new_movie_ids, replace with embedding for new_movie_ids.
-        #this not only subtracts the old and inserts the new, but gives them the same index so that they
-        # are findable when compared to the ground truth ratings.
-        for i, m_id in enumerate(original_movie_ids):
-            idx = m_id[0] - self.MOVIE_OFFSET
-            assert(self.movie_ids[idx].numpy().item() == m_id[0])
-            full_movie_embeddings[idx] = new_embeddings[i]
-            
-        top_k = self.top_k
-        
-        new_indexer = Retriever.build_scann_searcher(embeddings=full_movie_embeddings, top_k=top_k)
-    
-        #retrieve
-        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
-        
-        orig_neighbors, orig_distances = self.movie_indexer.search_batched(user_embeddings)
-        new_neighbors, new_distances = new_indexer.search_batched(user_embeddings)
-        
-        orig_results = self.evaluate_retrieval_with_tier_share(user_ids, orig_neighbors, self.MOVIE_OFFSET, candidate_pool_df, self.movie_tiers_df, top_k=top_k)
-        new_results = self.evaluate_retrieval_with_tier_share(user_ids, new_neighbors, self.MOVIE_OFFSET, candidate_pool_df, self.movie_tiers_df, top_k=top_k)
-
-        print("results on test set:\n", json.dumps(orig_results, indent=4))
-        print("results on test set cold start:\n", json.dumps(new_results, indent=4))
-        
-        res = self.compare_retrieval_runs(orig_results, new_results, top_k, self.model_dict["n_movies"], "test set", "cold-start set")
-        print("comparisons:\n", json.dumps(res, indent=4))
-        
-        with open(output_file_path, "w") as f:
-            json.dump(res, f, indent=4)
-        
     def compare_retrieval_runs(
             self,
             baseline: Dict[str, Any],

@@ -78,12 +78,12 @@ class Retriever:
 
         :param user_embed_path: path to TFRecords of all user embeddings made
            from latest trained Query model.  Note that in the parent directory for this
-           embedding, a file called emb_metadata.json is expected to exit.
+           embedding, a file called user_emb_metadata.json is expected to exit.
 
         :param movie_embed_path: path to TFRecords of all movie embeddings made
            from latest trained Candidate model.
            Note that in the parent directory for this
-           embedding, a file called emb_metadata.json is expected to exit
+           embedding, a file called movie_emb_metadata.json is expected to exit
 
         :param max_k: the maximum number of embeddings to return from a 
         ScANN embedding search.  This should be higher
@@ -127,7 +127,10 @@ class Retriever:
         
         #read the associated metadata file
         metadata_path = Retriever.get_parent_directory(file_paths[0])
-        metadata_path = f"{metadata_path}/emb_metadata.json"
+        if embedding_type == EmbeddingType.MOVIE:
+            metadata_path = f"{metadata_path}/movie_emb_metadata.json"
+        else:
+            metadata_path = f"{metadata_path}/user_emb_metadata.json"
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
         embed_dim = metadata['embed_dim']

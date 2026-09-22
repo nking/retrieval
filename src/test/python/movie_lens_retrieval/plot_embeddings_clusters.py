@@ -37,7 +37,7 @@ class PlotEmbeddingsClusters(unittest.TestCase):
             raise FileNotFoundError(self.movie_emb)
         # read the associated metadata file
         metadata_path = Retriever.get_parent_directory(file_paths[0])
-        metadata_path = f"{metadata_path}/emb_metadata.json"
+        metadata_path = f"{metadata_path}/movie_emb_metadata.json"
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
         self.embed_dim = metadata['embed_dim']

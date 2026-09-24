@@ -1,5 +1,6 @@
 from typing import Union
 
+import numpy as np
 import tensorflow as tf
 import polars as pl
 from numpy import ndarray as ndarray
@@ -46,31 +47,37 @@ class MovieData(object):
         }
 
 
-def get_movie_tiers_df(ratings_df: pl.DataFrame) -> pl.DataFrame:
+def get_movie_tiers_df(ratings_df: pl.DataFrame, catalog_df: pl.DataFrame) -> pl.DataFrame:
     """
     Given a Polars DataFrame with ['movie_id', ...],
     returns a DataFrame with 'movie_id', 'movie_tier' where tier is 0, 1, or 2 for
          head, torso, and tail of the distribution of the number of users ratings.
     """
     # Count history length per user
-    counts = ratings_df.group_by("movie_id").agg(
+    counts_df = ratings_df.group_by("movie_id").agg(
         pl.len().alias("movie_counts")
     )
     
-    # Find the exact cutoff lengths based on quantiles
-    tail_cutoff_val = counts["movie_counts"].quantile(0.20,
-        interpolation="nearest")
-    head_cutoff_val = counts["movie_counts"].quantile(0.80,
-        interpolation="nearest")
+    # Extract non-zero count array to compute NumPy percentiles (matching Beam)
+    counts_array = counts_df["movie_counts"].to_numpy()
+    if len(counts_array) == 0:
+        head_min, torso_min = 0, 0
+    else:
+        head_min = np.percentile(counts_array, 80)
+        torso_min = np.percentile(counts_array, 20)
     
-    # Map to tiers based on the cutoffs
-    movie_tiers_df = counts.with_columns(
-        pl.when(pl.col("movie_counts") <= tail_cutoff_val)
+    # oin with full catalog so 0-count items are included
+    tiers_df = catalog_df.select("movie_id").join(
+        counts_df, on="movie_id", how="left"
+    ).with_columns(
+        pl.col("movie_counts").fill_null(0)
+    ).with_columns(
+        pl.when((pl.col("movie_counts") == 0) | (pl.col("movie_counts") < torso_min))
         .then(2)  # Tail
-        .when(pl.col("movie_counts") >= head_cutoff_val)
+        .when(pl.col("movie_counts") >= head_min)
         .then(0)  # Head
         .otherwise(1)  # Torso
         .alias("movie_tier")
     ).select(["movie_id", "movie_tier"])
     
-    return movie_tiers_df
+    return tiers_df

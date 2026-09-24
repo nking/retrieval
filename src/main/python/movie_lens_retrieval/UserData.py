@@ -1,5 +1,6 @@
 from typing import Dict, Union
 
+import numpy as np
 import tensorflow as tf
 import polars as pl
 from numpy import ndarray as ndarray
@@ -7,8 +8,8 @@ from numpy import ndarray as ndarray
 class UserData(object):
     def __init__(self, users_path:str):
         """
-        given path to user file, creates a datastructure for movie_id access
-        :param users_path: path to the users.dat file containing fields movie_id, gender, age, occupation, zipcode.
+        given path to user file, creates a datastructure for user_id access
+        :param users_path: path to the users.dat file containing fields user_id, gender, age, occupation, zipcode.
         For now, provide a parquet file.  Also note that the user_ids must be ordered from 1 to N.
         """
         if not users_path.endswith(".array_record"):
@@ -31,8 +32,8 @@ class UserData(object):
         get a dictionary of inputs usable for the Query model dictionary signature.
         
         :param user_id: a tensor of an array of integer user_ids.
-           example usage: user_data.get_user(movie_id=tf.constant([123]), timestamp=tf.constant([-1]))
-        :param timestamp: timestamp associated with the movie_id request. if the value
+           example usage: user_data.get_user(user_id=tf.constant([123]), timestamp=tf.constant([-1]))
+        :param timestamp: timestamp associated with the user_id request. if the value
            is -1, it gets reset to tf.timestamp().
         :return:
         """
@@ -68,32 +69,41 @@ class UserData(object):
         return 1 <= user_id <= self.num_users
 
 
-def get_user_tiers_df(ratings_df: pl.DataFrame) -> pl.DataFrame:
+def get_user_tiers_df(ratings_df: pl.DataFrame, catalog_df: pl.DataFrame) -> pl.DataFrame:
     """
     Given a Polars DataFrame with ['user_id', ...],
     returns DataFrame with columns 'user_id', 'user_tier' where tier is 0, 1, or 2 for
          head, torso, and tail of the distribution of the number of users ratings.
     """
     # Count history length per user
-    user_counts = ratings_df.group_by("user_id").agg(
-        pl.len().alias("history_length")
+    counts_df = ratings_df.group_by("user_id").agg(
+        pl.len().alias("user_counts")
     )
     
-    # Find the exact cutoff lengths based on quantiles
-    tail_cutoff_val = user_counts["history_length"].quantile(0.20, interpolation="nearest")
-    head_cutoff_val = user_counts["history_length"].quantile(0.80, interpolation="nearest")
+    # Extract non-zero count array to compute NumPy percentiles (matching Beam)
+    counts_array = counts_df["user_counts"].to_numpy()
+    if len(counts_array) == 0:
+        head_min, torso_min = 0, 0
+    else:
+        head_min = np.percentile(counts_array, 80)
+        torso_min = np.percentile(counts_array, 20)
     
-    # Map to tiers based on the cutoffs
-    user_tiers_df = user_counts.with_columns(
-        pl.when(pl.col("history_length") <= tail_cutoff_val)
+    # oin with full catalog so 0-count items are included
+    tiers_df = catalog_df.select("user_id").join(
+        counts_df, on="user_id", how="left"
+    ).with_columns(
+        pl.col("user_counts").fill_null(0)
+    ).with_columns(
+        pl.when((pl.col("user_counts") == 0) | (
+                    pl.col("user_counts") < torso_min))
         .then(2)  # Tail
-        .when(pl.col("history_length") >= head_cutoff_val)
+        .when(pl.col("user_counts") >= head_min)
         .then(0)  # Head
         .otherwise(1)  # Torso
         .alias("user_tier")
     ).select(["user_id", "user_tier"])
     
-    return user_tiers_df
+    return tiers_df
 
 
 def get_user_tiers_from_df(ratings_df: pl.DataFrame) -> Dict[int, int]:

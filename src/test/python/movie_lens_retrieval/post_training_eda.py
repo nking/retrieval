@@ -42,7 +42,7 @@ class TestAnalysis(unittest.TestCase):
         self.user_movie_models_dir = os.path.join(saved_models_dir, "user_movie_model")
         
         #temporary change to check latest model
-        saved_models_dir = os.path.join(get_project_dir(), "../TMP3/bin/rs_pipeline/Pusher/pushed_model")
+        saved_models_dir = os.path.join(get_project_dir(), "../TMP7/bin/rs_pipeline/Pusher/pushed_model")
         self.user_movie_models_dir = os.path.join(saved_models_dir, "21")
         self.assertTrue(os.path.exists(self.user_movie_models_dir))
         
@@ -111,13 +111,19 @@ class TestAnalysis(unittest.TestCase):
         
         train_history_df = self.read_ratings_to_df(self.ratings_dict['positive_train'])
         
-        self.movie_tiers_df = get_movie_tiers_df(train_history_df)
-        self.user_tiers_df = get_user_tiers_df(train_history_df)
+        self.movie_tiers_df = get_movie_tiers_df(train_history_df, pl.read_parquet(self.movies_path))
+        self.user_tiers_df = get_user_tiers_df(train_history_df, pl.read_parquet(self.users_path))
         
         self.movie_indexer : ScannSearcher = Retriever.build_scann_searcher(embeddings=self.movie_catalog_embeddings,
             top_k=self.top_k)
         
         self.output_dir = os.path.join(get_bin_dir(), "post_training_analysis")
+        self.output_conclusions_dict = dict()
+        
+    def tearDown(self):
+        output_summary = os.path.join(self.output_dir, "summary.json")
+        with open(output_summary, "w") as f:
+            json.dump(self.output_conclusions_dict, f, indent=4)
 
     def test_data_shifts(self):
         output_file_path = os.path.join(self.output_dir, "data_shifts.json")
@@ -226,6 +232,8 @@ class TestAnalysis(unittest.TestCase):
             )
         
         res["automated_conclusions"] = conclusions
+        
+        self.output_conclusions_dict['data_shifts'] = conclusions
         
         #res = self.convert_to_native_types(res)
         
@@ -473,6 +481,8 @@ class TestAnalysis(unittest.TestCase):
                 conclusions.append(
                     f"BALANCED ITEM TIER RANKING: NDCG performance remains consistent across movie tiers (Tier 0: {ndcg_mt0:.2%}, Tier 2: {ndcg_mt2:.2%}), indicating stable retrieval across popular and long-tail catalogs.")
             agg_res["automated_conclusions"] = conclusions
+            
+            self.output_conclusions_dict[f'stratified_metrics@{top_k}'] = conclusions
         
         print(f'metrics\n={json.dumps(agg_res, indent=4)}')
         
@@ -730,6 +740,8 @@ class TestAnalysis(unittest.TestCase):
                 
                 res["automated_conclusions"] = conclusions
                 
+                self.output_conclusions_dict[f'coverage@{top_k}'] = conclusions
+                
                 agg_res[f"eval_k_{top_k}"] = res
                 
         print(f'\n', json.dumps(agg_res, indent=4))
@@ -884,6 +896,8 @@ class TestAnalysis(unittest.TestCase):
             conclusions.append(f"HEALTHY ALIGNMENT: Average positive pair distance is {avg_alignment:.2f}. Model balances proximity to positive items while maintaining generalization space.")
     
         agg_res["automated_conclusions"] = conclusions
+        
+        self.output_conclusions_dict["embeding_hubness"] = conclusions
         
         agg_res = self.convert_to_native_types(agg_res)
         print(f"Embedding Hubness:\n", json.dumps(agg_res, indent=4))
@@ -1262,6 +1276,8 @@ class TestAnalysis(unittest.TestCase):
                 f"[NEUTRAL POPULARITY]: Model preserves user consumption habits (Ratio: {amplification_ratio:.2f}x). "
                 f"Retrieved item popularity aligns closely with ground truth behavior."
             )
+            
+        self.output_conclusions_dict[f"{tag}_popularity_bias"] = conclusions
         
         return {
             f"{tag}_metrics": {
@@ -1416,6 +1432,8 @@ class TestAnalysis(unittest.TestCase):
                     f"[STABLE INTER-USER SEPARATION]: {exp_name} maintains consistent cross-user slate overlap relative to {baseline_name} "
                     f"({baseline_jaccard * 100:.2f}% vs {mean_jaccard * 100:.2f}%)."
                 )
+        
+        self.output_conclusions_dict[f"{dict_tag}_inter_user_diversity_conclusions"] = conclusions
         
         return {
             f"{dict_tag}_inter_user_diversity_metrics": metrics,
@@ -1585,28 +1603,30 @@ class TestAnalysis(unittest.TestCase):
         diversity_ratio = model_ild / random_ild if random_ild > 0 else 0.0
         
         # Automated Text Analysis
-        analysis = []
+        conclusions = []
         if diversity_ratio < 0.20:
-            analysis.append(
+            conclusions.append(
                 f"[EXTREME CLUSTERING]: Model ILD ({model_ild:.4f}) retains only {diversity_ratio * 100:.1f}% of random catalog diversity. "
                 f"Risk of severe candidate bottlenecking into a single sub-genre."
             )
         elif diversity_ratio < 0.50:
-            analysis.append(
+            conclusions.append(
                 f"[FOCUSED CANDIDATE POOL]: Model ILD ({model_ild:.4f}) retains {diversity_ratio * 100:.1f}% of random catalog diversity. "
                 f"This indicates strong, coherent cluster targeting around user preferences."
             )
         else:
-            analysis.append(
+            conclusions.append(
                 f"[BROAD CANDIDATE POOL]: Model ILD ({model_ild:.4f}) retains {diversity_ratio * 100:.1f}% of random catalog diversity. "
                 f"Candidates span multiple distinct semantic regions in the embedding space."
             )
+            
+        self.output_conclusions_dict["intra-list divserity"] = conclusions
         
         return {
             "model_ild": round(model_ild, 6),
             "random_ild": round(random_ild, 6),
             "diversity_ratio": round(diversity_ratio, 4),
-            "analysis": analysis
+            "analysis": conclusions
         }
     
     def get_cold_start_movies(self, pos_test_df: pl.DataFrame) -> Tuple[tf.Tensor, tf.Tensor]:
@@ -1763,6 +1783,8 @@ class TestAnalysis(unittest.TestCase):
             f"[SLATE COMPOSITION - {exp_name}]: "
             f"Top-{top_k} candidate slates consist of {t0_share * 100:.1f}% Tier 0, {t1_share * 100:.1f}% Tier 1, and {t2_share * 100:.1f}% Tier 2 items."
         )
+        
+        self.output_conclusions_dict['cold_start_embeddings'] = conclusions
         
         return {
             "expected_random_recall": round(expected_random_recall, 6),

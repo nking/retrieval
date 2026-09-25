@@ -173,7 +173,7 @@ class CalcMetrics(unittest.TestCase):
             up to that point in time...
         '''
         
-        top_k = 20
+        top_k = 100
         
         df_test_ratings = self._read_ratings_array_record(os.path.join(get_project_dir(),
             'src/test/resources/data/ratings_test_liked/ratings_test_liked.array_record'))
@@ -224,7 +224,7 @@ class CalcMetrics(unittest.TestCase):
         
         #calc metrics using vectorized ops:
         results = self._calculate_metrics(rec_movies, ordered_user_ids,
-            user_ground_truth_set, user_relevance_map, k=20)
+            user_ground_truth_set, user_relevance_map, k=100)
         rprint(results)
         '''
         {
@@ -235,7 +235,7 @@ class CalcMetrics(unittest.TestCase):
         }'''
         
     def _calculate_metrics(self, recommendations:np.ndarray, user_ids:np.ndarray,
-        users_ground_truth_set:dict, relevance_map:dict, k:int=20) -> Dict[str, float]:
+        users_ground_truth_set:dict, relevance_map:dict, k:int=100) -> Dict[str, float]:
         
         hits_list = []
         recalls = []
@@ -301,7 +301,7 @@ class CalcMetrics(unittest.TestCase):
         this narrow group  will receive broadened recommendations that may be more diverse.
         """
         
-        top_ks = [20]#, 50, 100, 200, 1000]
+        top_ks = [100]#, 50, 100, 200, 1000]
         
         # Note: SciPy uses different labels:
         # M = Total population

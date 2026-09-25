@@ -41,7 +41,7 @@ class TestAnalysis(unittest.TestCase):
         cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, "user_movie_model")
         
         #temporary change to check latest model
-        cls.saved_models_dir = os.path.join(get_project_dir(), "../TMP7/bin/rs_pipeline/Pusher/pushed_model")
+        cls.saved_models_dir = os.path.join(get_project_dir(), "../TMP8/bin/rs_pipeline/Pusher/pushed_model")
         cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, "21")
         #self.assertTrue(os.path.exists(cls.user_movie_models_dir))
         
@@ -239,19 +239,24 @@ class TestAnalysis(unittest.TestCase):
         
         with open(output_file_path, "w") as f:
             json.dump(res, f, indent=4)
-
+    
     def test_stratified_metrics(self):
         
-        output_file_path = os.path.join(TestAnalysis.summary_output_dir, "stratified_metrics.json")
+        output_file_path = os.path.join(TestAnalysis.summary_output_dir,
+            "stratified_metrics.json")
         
         # pos_test_df is ground truth positives test dataset w/ columns: user_id, movie_id, rating, timestamp
-        pos_test_df = read_ratings_to_df( TestAnalysis.ratings_dict["positive_test"])
-        user_ids, timestamps = get_user_and_first_timestamp_from_ratings(pos_test_df)
+        pos_test_df = read_ratings_to_df(
+            TestAnalysis.ratings_dict["positive_test"])
+        user_ids, timestamps = get_user_and_first_timestamp_from_ratings(
+            pos_test_df)
         user_ids = np.expand_dims(user_ids, axis=1)
         timestamps = np.expand_dims(timestamps, axis=1)
-        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
+        user_embeddings = self.create_user_embeddings_batch(user_ids,
+            timestamps)
         
-        pos_test_tiered = pos_test_df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
+        pos_test_tiered = pos_test_df.join(TestAnalysis.movie_tiers_df,
+            on="movie_id", how="left")
         # Calculate ground-truth positive counts per user: overall and per tier
         user_gt_counts = pos_test_tiered.group_by("user_id").agg(
             pl.len().alias("total_positives"),
@@ -263,25 +268,27 @@ class TestAnalysis(unittest.TestCase):
         agg_res = dict()
         
         for top_k in (20, TestAnalysis.default_top_k):
-        
+            
             catalog_size = TestAnalysis.model_dict['n_movies']
             
-            expected_random_recall = float(top_k)/float(catalog_size)
+            expected_random_recall = float(top_k) / float(catalog_size)
             
-            #expected DCG@K = (N/C) * sum_{r=1,K}(1/log_2(r+1)) where N is the user's number of ground truth ratings and D is catalog size
-            expected_random_dcg_part1 = sum([(1./np.log2(r + 1.)) for r in range(1, top_k+1)])/float(catalog_size)
+            # expected DCG@K = (N/C) * sum_{r=1,K}(1/log_2(r+1))
+            expected_random_dcg_part1 = sum(
+                [(1. / np.log2(r + 1.)) for r in range(1, top_k + 1)]) / float(
+                catalog_size)
             
-            #np.ndarrays of shape (n_users, top_k)
-            neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(queries=user_embeddings, final_num_neighbors=top_k)
+            # np.ndarrays of shape (n_users, top_k)
+            neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(
+                queries=user_embeddings, final_num_neighbors=top_k)
             neighbors += TestAnalysis.MOVIE_OFFSET
-            #neighbors are the ANN search result top_k movie_ids
             
             retrieval_df = pl.DataFrame({
                 "user_id": user_ids.squeeze(),
-                "movie_id": neighbors  # shape (n_users, top_k)
+                "movie_id": neighbors
             }).explode("movie_id")
-            # height: (n_users * top_k)  where n_users=user_ids.len() where user_ids are the unique users in pos_test_df below
-            # rank the movie_ids for each user:
+            
+            # Rank the movie_ids for each user:
             retrieval_df = retrieval_df.with_columns(
                 pl.int_range(1, pl.len() + 1).over("user_id").alias("rank")
             )
@@ -290,23 +297,23 @@ class TestAnalysis(unittest.TestCase):
                 pl.len().alias("total_positives")
             )
             
-            # HITS: for each user, count the intersection of user_id, movie_id in retrieval_df with pos_test_df, user_id, movie_id
-            
-            retrieval_df = retrieval_df.join(pos_test_df, on=["user_id", "movie_id"], how="left")
-            # Join movie_tier metadata at the item level BEFORE user aggregation
-            retrieval_df = retrieval_df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
+            retrieval_df = retrieval_df.join(pos_test_df,
+                on=["user_id", "movie_id"], how="left")
+            retrieval_df = retrieval_df.join(TestAnalysis.movie_tiers_df,
+                on="movie_id", how="left")
             
             metrics_df = retrieval_df.group_by("user_id").agg(
                 pl.col("rating").is_not_null().sum().alias("hits_at_k"),
-                (1.0 / (pl.col("rank").filter(pl.col("rating").is_not_null()) + 1.0).log(2)).sum().alias("dcg_at_k")
+                (1.0 / (pl.col("rank").filter(
+                    pl.col("rating").is_not_null()) + 1.0).log(2)).sum().alias(
+                    "dcg_at_k")
             )
-            # add column "user_tier":
-            metrics_df = metrics_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
-            # Calculate Native IDCG, NDCG, and Baselines
+            metrics_df = metrics_df.join(TestAnalysis.user_tiers_df,
+                on="user_id", how="left")
+            
+            # Calculate Native IDCG, NDCG, Precision, and Baselines
             metrics_df = metrics_df.join(user_pos_counts, on="user_id",
                 how="inner").with_columns(
-                # Native Polars IDCG: Generates [1, 2, ..., min(positives, K)], applies discount, and sums.
-                # This ports 1:1 to Rust.
                 pl.int_ranges(1, pl.min_horizontal(pl.col("total_positives"),
                     pl.lit(top_k)) + 1)
                 .list.eval(1.0 / (pl.element() + 1.0).log(2))
@@ -314,89 +321,119 @@ class TestAnalysis(unittest.TestCase):
                 .alias("idcg_at_k")
             ).with_columns(
                 # Model Metrics
-                (pl.col("hits_at_k") / pl.col("total_positives")).alias("recall_at_k"),
-                (pl.col("dcg_at_k") / pl.col("idcg_at_k")).fill_nan(0.0).alias("ndcg_at_k"),
+                (pl.col("hits_at_k") / pl.col("total_positives")).alias(
+                    "recall_at_k"),
+                (pl.col("hits_at_k") / float(top_k)).alias("precision_at_k"),
+                (pl.col("dcg_at_k") / pl.col("idcg_at_k")).fill_nan(0.0).alias(
+                    "ndcg_at_k"),
                 
                 # Expected Random Baselines
-                pl.lit(expected_random_recall).alias("expected_random_recall_at_k"),
-                (pl.col("total_positives") * expected_random_dcg_part1 /
-                 pl.col("idcg_at_k")).alias("expected_random_ndcg_at_k")
+                pl.lit(expected_random_recall).alias(
+                    "expected_random_recall_at_k"),
+                (pl.col("total_positives") / float(catalog_size)).alias(
+                    "expected_random_precision_at_k"),
+                (pl.col(
+                    "total_positives") * expected_random_dcg_part1 / pl.col(
+                    "idcg_at_k")).alias("expected_random_ndcg_at_k")
             )
             
             res = {
-                f"mean_recall_at_{top_k}" : metrics_df.select(pl.col("recall_at_k")).mean().item(),
-                f"mean_ndcg_at_{top_k}" : metrics_df.select(pl.col("ndcg_at_k")).mean().item(),
-                f"mean_random_recall_at_{top_k}" : metrics_df.select(pl.col("expected_random_recall_at_k")).mean().item(),
-                f"mean_random_ndcg_at_{top_k}" : metrics_df.select(pl.col("expected_random_ndcg_at_k")).mean().item()
+                f"mean_recall_at_{top_k}": metrics_df.select(
+                    pl.col("recall_at_k")).mean().item(),
+                f"mean_precision_at_{top_k}": metrics_df.select(
+                    pl.col("precision_at_k")).mean().item(),
+                f"mean_ndcg_at_{top_k}": metrics_df.select(
+                    pl.col("ndcg_at_k")).mean().item(),
+                f"mean_random_recall_at_{top_k}": metrics_df.select(
+                    pl.col("expected_random_recall_at_k")).mean().item(),
+                f"mean_random_precision_at_{top_k}": metrics_df.select(
+                    pl.col("expected_random_precision_at_k")).mean().item(),
+                f"mean_random_ndcg_at_{top_k}": metrics_df.select(
+                    pl.col("expected_random_ndcg_at_k")).mean().item()
             }
             
             agg_res = agg_res | res
             
-            for user_tier in (0,1,2):
+            for user_tier in (0, 1, 2):
                 df = metrics_df.filter(pl.col("user_tier") == user_tier)
                 res = {
-                    f"user_tier_{user_tier}_mean_recall_at_{top_k}" : df.select(pl.col("recall_at_k")).mean().item(),
-                    f"user_tier_{user_tier}_mean_ndcg_at_{top_k}" : df.select(pl.col("ndcg_at_k")).mean().item(),
+                    f"user_tier_{user_tier}_mean_recall_at_{top_k}": df.select(
+                        pl.col("recall_at_k")).mean().item(),
+                    f"user_tier_{user_tier}_mean_precision_at_{top_k}": df.select(
+                        pl.col("precision_at_k")).mean().item(),
+                    f"user_tier_{user_tier}_mean_ndcg_at_{top_k}": df.select(
+                        pl.col("ndcg_at_k")).mean().item(),
                 }
                 agg_res = agg_res | res
             
             # ====== conclusions ==========
             
-            ## calculate the movie_tier metrics
             metrics_df = retrieval_df.group_by("user_id").agg(
-                # Global Hits & DCG
                 pl.col("rating").is_not_null().sum().alias("hits_global"),
-                (1.0 / (pl.col("rank").filter(pl.col("rating").is_not_null()) + 1.0).log(2)).sum().alias( "dcg_global"),
-                # Tier-Specific Hits
-                *[(pl.col("rating").is_not_null() & (pl.col("movie_tier") == tier)).sum().alias(
+                (1.0 / (pl.col("rank").filter(
+                    pl.col("rating").is_not_null()) + 1.0).log(2)).sum().alias(
+                    "dcg_global"),
+                *[(pl.col("rating").is_not_null() & (
+                            pl.col("movie_tier") == tier)).sum().alias(
                     f"hits_tier_{tier}") for tier in (0, 1, 2)],
-                # Tier-Specific DCG
-                *[(1.0 / (pl.col("rank").filter(pl.col("rating").is_not_null() & (pl.col("movie_tier") == tier)
-                    ) + 1.0).log(2)).sum().alias(f"dcg_tier_{tier}") for tier in (0, 1, 2)
-                ]
+                *[(1.0 / (pl.col("rank").filter(
+                    pl.col("rating").is_not_null() & (
+                                pl.col("movie_tier") == tier)) + 1.0).log(
+                    2)).sum().alias(f"dcg_tier_{tier}") for tier in (0, 1, 2)]
             )
-            #Join pre-computed ground-truth positive counts
-            metrics_df = metrics_df.join(user_gt_counts, on="user_id", how="inner")
-            # Compute Global and Tier-Specific IDCGs
+            metrics_df = metrics_df.join(user_gt_counts, on="user_id",
+                how="inner")
+            
             metrics_df = metrics_df.with_columns(
-                # Global IDCG
-                pl.int_ranges(1, pl.min_horizontal(pl.col("total_positives"), pl.lit(top_k)) + 1)
+                pl.int_ranges(1, pl.min_horizontal(pl.col("total_positives"),
+                    pl.lit(top_k)) + 1)
                 .list.eval(1.0 / (pl.element() + 1.0).log(2))
                 .list.sum()
                 .alias("idcg_global"),
-                
-                # Tier IDCGs: evaluates to null if user has 0 positive targets in that tier
                 *[
                     pl.when(pl.col(f"gt_pos_tier_{tier}") > 0)
-                    .then(
-                        pl.int_ranges(1, pl.min_horizontal(pl.col(f"gt_pos_tier_{tier}"), pl.lit(top_k)) + 1)
+                .then(
+                        pl.int_ranges(1,
+                            pl.min_horizontal(pl.col(f"gt_pos_tier_{tier}"),
+                                pl.lit(top_k)) + 1)
                         .list.eval(1.0 / (pl.element() + 1.0).log(2))
                         .list.sum()
                     )
-                    .otherwise(None)
-                    .alias(f"idcg_tier_{tier}")
+                .otherwise(None)
+                .alias(f"idcg_tier_{tier}")
                     for tier in (0, 1, 2)
                 ]
             )
-            # Compute Final Metrics (Global & Per-Tier)
+            
             metrics_df = metrics_df.with_columns(
                 # Global metrics
-                (pl.col("hits_global") / pl.col("total_positives")).alias("recall_global"),
-                (pl.col("dcg_global") / pl.col("idcg_global")).fill_nan(0.0).alias("ndcg_global"),
+                (pl.col("hits_global") / pl.col("total_positives")).alias(
+                    "recall_global"),
+                (pl.col("hits_global") / float(top_k)).alias(
+                    "precision_global"),
+                (pl.col("dcg_global") / pl.col("idcg_global")).fill_nan(
+                    0.0).alias("ndcg_global"),
                 
-                # Tier Recall: null if user has 0 ground-truth targets in tier
+                # Tier Recall & Precision
                 *[
                     pl.when(pl.col(f"gt_pos_tier_{tier}") > 0)
-                    .then(pl.col(f"hits_tier_{tier}") / pl.col(f"gt_pos_tier_{tier}"))
+                    .then(pl.col(f"hits_tier_{tier}") / pl.col(
+                        f"gt_pos_tier_{tier}"))
                     .otherwise(None)
                     .alias(f"recall_tier_{tier}")
                     for tier in (0, 1, 2)
                 ],
+                *[
+                    (pl.col(f"hits_tier_{tier}") / float(top_k)).alias(
+                        f"precision_tier_{tier}")
+                    for tier in (0, 1, 2)
+                ],
                 
-                # Tier NDCG: null if user has 0 ground-truth targets in tier
+                # Tier NDCG
                 *[
                     pl.when(pl.col(f"idcg_tier_{tier}").is_not_null())
-                    .then(pl.col(f"dcg_tier_{tier}") / pl.col(f"idcg_tier_{tier}"))
+                    .then(pl.col(f"dcg_tier_{tier}") / pl.col(
+                        f"idcg_tier_{tier}"))
                     .otherwise(None)
                     .alias(f"ndcg_tier_{tier}")
                     for tier in (0, 1, 2)
@@ -404,23 +441,37 @@ class TestAnalysis(unittest.TestCase):
                 
                 # Random baselines
                 pl.lit(expected_random_recall).alias("expected_random_recall"),
-                (pl.col("total_positives") * expected_random_dcg_part1 / pl.col("idcg_global")).alias("expected_random_ndcg")
+                (pl.col("total_positives") / float(catalog_size)).alias(
+                    "expected_random_precision"),
+                (pl.col(
+                    "total_positives") * expected_random_dcg_part1 / pl.col(
+                    "idcg_global")).alias("expected_random_ndcg")
             )
+            
             res = {
-                f"_mean_recall_at_{top_k}": metrics_df.select(pl.col("recall_global")).mean().item(),
-                f"_mean_ndcg_at_{top_k}": metrics_df.select(pl.col("ndcg_global")).mean().item(),
-                f"_mean_random_recall_at_{top_k}": metrics_df.select(pl.col("expected_random_recall")).mean().item(),
-                f"_mean_random_ndcg_at_{top_k}": metrics_df.select(pl.col("expected_random_ndcg")).mean().item(),
+                f"_mean_recall_at_{top_k}": metrics_df.select(
+                    pl.col("recall_global")).mean().item(),
+                f"_mean_precision_at_{top_k}": metrics_df.select(
+                    pl.col("precision_global")).mean().item(),
+                f"_mean_ndcg_at_{top_k}": metrics_df.select(
+                    pl.col("ndcg_global")).mean().item(),
+                f"_mean_random_recall_at_{top_k}": metrics_df.select(
+                    pl.col("expected_random_recall")).mean().item(),
+                f"_mean_random_precision_at_{top_k}": metrics_df.select(
+                    pl.col("expected_random_precision")).mean().item(),
+                f"_mean_random_ndcg_at_{top_k}": metrics_df.select(
+                    pl.col("expected_random_ndcg")).mean().item(),
                 
-                # Tier-stratified Recall and NDCG metrics
+                **{f"recall_movie_tier_{tier}_at_{top_k}": metrics_df.select(
+                    pl.col(f"recall_tier_{tier}")).mean().item() for tier in
+                    (0, 1, 2)},
                 **{
-                    f"recall_movie_tier_{tier}_at_{top_k}": metrics_df.select(pl.col(f"recall_tier_{tier}")).mean().item()
-                    for tier in (0, 1, 2)
-                },
-                **{
-                    f"ndcg_movie_tier_{tier}_at_{top_k}": metrics_df.select(pl.col(f"ndcg_tier_{tier}")).mean().item()
-                    for tier in (0, 1, 2)
-                }
+                    f"precision_movie_tier_{tier}_at_{top_k}": metrics_df.select(
+                        pl.col(f"precision_tier_{tier}")).mean().item() for
+                    tier in (0, 1, 2)},
+                **{f"ndcg_movie_tier_{tier}_at_{top_k}": metrics_df.select(
+                    pl.col(f"ndcg_tier_{tier}")).mean().item() for tier in
+                    (0, 1, 2)}
             }
             agg_res = agg_res | res
             
@@ -428,17 +479,30 @@ class TestAnalysis(unittest.TestCase):
             
             global_recall = agg_res[f"mean_recall_at_{top_k}"]
             random_recall = agg_res[f"mean_random_recall_at_{top_k}"]
+            global_precision = agg_res[f"mean_precision_at_{top_k}"]
+            random_precision = agg_res[f"mean_random_precision_at_{top_k}"]
             
             # Baseline Performance Lift
             if global_recall > random_recall * 3:
                 conclusions.append(
-                    f"STRONG BASELINE LIFT: Global Recall@{top_k} ({global_recall:.1%}) heavily outperforms the random expected baseline ({random_recall:.1%}). The candidate generator is extracting meaningful semantic signal.")
+                    f"STRONG RECALL LIFT: Global Recall@{top_k} ({global_recall:.1%}) heavily outperforms the random expected baseline ({random_recall:.1%}). The candidate generator is extracting meaningful semantic signal.")
             elif global_recall > random_recall:
                 conclusions.append(
-                    f"MODERATE BASELINE LIFT: Global Recall@{top_k} ({global_recall:.1%}) beats the random baseline ({random_recall:.1%}), but there is room for improvement.")
+                    f"MODERATE RECALL LIFT: Global Recall@{top_k} ({global_recall:.1%}) beats the random baseline ({random_recall:.1%}), but there is room for improvement.")
             else:
                 conclusions.append(
-                    "BASELINE FAILURE: The model fails to outperform a random candidate generator.")
+                    "RECALL FAILURE: The model fails to outperform a random candidate generator on Recall.")
+            
+            # Precision Lift
+            if global_precision > random_precision * 3:
+                conclusions.append(
+                    f"STRONG PRECISION LIFT: Global Precision@{top_k} ({global_precision:.2%}) heavily outperforms the random expected precision ({random_precision:.2%}), indicating high density of relevant items in the retrieved slates.")
+            elif global_precision > random_precision:
+                conclusions.append(
+                    f"MODERATE PRECISION LIFT: Global Precision@{top_k} ({global_precision:.2%}) is better than random ({random_precision:.2%}), suggesting basic relevance filtering is functioning.")
+            else:
+                conclusions.append(
+                    "PRECISION FAILURE: The model retrieves slates with the same or worse precision than a completely random draw.")
             
             # Cohort History Utilization (Recall Trend)
             recall_t0 = agg_res[f"user_tier_0_mean_recall_at_{top_k}"]
@@ -478,9 +542,11 @@ class TestAnalysis(unittest.TestCase):
             else:
                 conclusions.append(
                     f"BALANCED ITEM TIER RANKING: NDCG performance remains consistent across movie tiers (Tier 0: {ndcg_mt0:.2%}, Tier 2: {ndcg_mt2:.2%}), indicating stable retrieval across popular and long-tail catalogs.")
+            
             agg_res["automated_conclusions"] = conclusions
             
-            TestAnalysis.summary_output_conclusions_dict[f'stratified_metrics@{top_k}'] = conclusions
+            TestAnalysis.summary_output_conclusions_dict[
+                f'stratified_metrics@{top_k}'] = conclusions
         
         print(f'metrics\n={json.dumps(agg_res, indent=4)}')
         

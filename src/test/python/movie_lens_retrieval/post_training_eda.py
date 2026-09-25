@@ -19,9 +19,6 @@ import seaborn as sns
 from sklearn.manifold import TSNE
 import tensorflow as tf
 import numpy as np
-import json
-from datetime import datetime
-from itertools import chain
 
 from helper import get_project_dir, get_bin_dir, \
     get_random_user_and_first_timestamp_from_ratings, \
@@ -30,38 +27,40 @@ from helper import get_project_dir, get_bin_dir, \
 
 from movie_lens_retrieval.MovieData import MovieData, get_movie_tiers_df
 from movie_lens_retrieval.Retriever import Retriever
-from movie_lens_retrieval.UserData import UserData, get_user_tiers_df, get_user_tiers_from_df
+from movie_lens_retrieval.UserData import UserData, get_user_tiers_df
 from scann.scann_ops.py.scann_ops_pybind import ScannSearcher
 
 class TestAnalysis(unittest.TestCase):
-    def setUp(self):
+    
+    @classmethod
+    def setUpClass(cls):
         
-        self.top_k = 100
+        cls.default_top_k = 100
         
-        saved_models_dir = os.path.join(get_project_dir(), "src/main/resources/serving_models")
-        self.user_movie_models_dir = os.path.join(saved_models_dir, "user_movie_model")
+        cls.saved_models_dir = os.path.join(get_project_dir(), "src/main/resources/serving_models")
+        cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, "user_movie_model")
         
         #temporary change to check latest model
-        saved_models_dir = os.path.join(get_project_dir(), "../TMP7/bin/rs_pipeline/Pusher/pushed_model")
-        self.user_movie_models_dir = os.path.join(saved_models_dir, "21")
-        self.assertTrue(os.path.exists(self.user_movie_models_dir))
+        cls.saved_models_dir = os.path.join(get_project_dir(), "../TMP7/bin/rs_pipeline/Pusher/pushed_model")
+        cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, "21")
+        #self.assertTrue(os.path.exists(cls.user_movie_models_dir))
+        
+        cls.loaded_user_movie_model = tf.saved_model.load(TestAnalysis.user_movie_models_dir)
         
         test_res_dir = os.path.join(get_project_dir(), "src/test/resources/data")
         
-        self.cold_start_path = os.path.join(test_res_dir, "cold_start_movies.txt")
+        cold_start_path = os.path.join(test_res_dir, "cold_start_movies.txt")
         
-        self.users_path = os.path.join(test_res_dir, "users/users.parquet")
-        self.movies_path = os.path.join(test_res_dir, "movies/movies.parquet")
+        users_path = os.path.join(test_res_dir, "users/users.parquet")
+        cls.movies_path = os.path.join(test_res_dir, "movies/movies.parquet")
         
-        self.model_dict = self.read_model_assets_hparams(
-            self.user_movie_models_dir)
-        self.MOVIE_OFFSET: int = self.model_dict['n_users'] + 1
-        self.embed_dim = json.loads(self.model_dict['layer_sizes'])[-1]
-        self.user_id_range_incl = [1, self.model_dict['n_users']]
-        self.movie_id_range_incl = [self.MOVIE_OFFSET,
-            self.MOVIE_OFFSET + self.model_dict['n_movies']]
+        cls.model_dict = read_model_assets_hparams(TestAnalysis.user_movie_models_dir)
+        cls.MOVIE_OFFSET: int = cls.model_dict['n_users'] + 1
+        embed_dim = json.loads(cls.model_dict['layer_sizes'])[-1]
+        cls.user_id_range_incl = [1, cls.model_dict['n_users']]
+        cls.movie_id_range_incl = [cls.MOVIE_OFFSET, cls.MOVIE_OFFSET + cls.model_dict['n_movies']]
         
-        self.ratings_dict = {
+        cls.ratings_dict = {
             "full_history" : [
                     os.path.join(test_res_dir, "ratings_train.array_record"),
                     os.path.join(test_res_dir, "ratings_val.array_record")
@@ -76,21 +75,19 @@ class TestAnalysis(unittest.TestCase):
             "positive_test": os.path.join(test_res_dir, "ratings_test_liked.array_record"),
         }
         
-        self.emb_movie_feature_spec = {
+        emb_movie_feature_spec = {
             "movie_id": tf.io.FixedLenFeature(shape=[], dtype=tf.int64,
                 default_value=None),
-            "embedding": tf.io.FixedLenFeature(shape=[self.embed_dim],
-                dtype=tf.float32)
+            "embedding": tf.io.FixedLenFeature(shape=[embed_dim], dtype=tf.float32)
         }
         
-        self.emb_user_feature_spec = {
+        emb_user_feature_spec = {
             "user_id": tf.io.FixedLenFeature(shape=[], dtype=tf.int64,
                 default_value=None),
-            "embedding": tf.io.FixedLenFeature(shape=[self.embed_dim],
-                dtype=tf.float32)
+            "embedding": tf.io.FixedLenFeature(shape=[embed_dim], dtype=tf.float32)
         }
         
-        self.user_feature_spec = {
+        user_feature_spec = {
             "user_id": tf.io.FixedLenFeature([], tf.int64),
             "gender": tf.io.FixedLenFeature([], tf.string),
             "age": tf.io.FixedLenFeature([], tf.int64),
@@ -98,39 +95,40 @@ class TestAnalysis(unittest.TestCase):
             "timestamp": tf.io.FixedLenFeature([], tf.int64),
         }
         
-        self.movie_feature_spec = {
+        movie_feature_spec = {
             "movie_id": tf.io.FixedLenFeature([], tf.int64),
             "genres": tf.io.FixedLenFeature([], tf.string)}
         
-        self.user_data = UserData(self.users_path)
-        self.movie_data = MovieData(self.movies_path, self.MOVIE_OFFSET)
+        cls.user_data = UserData(users_path)
+        cls.movie_data = MovieData(cls.movies_path, cls.MOVIE_OFFSET)
         
         #to make it easier to point script to a new model, will generate the movie embeddings live
         # tf.Tensors:
-        self.movie_ids, self.movie_catalog_embeddings = self.create_movie_catalog_embeddings()
+        cls.catalog_movie_ids, cls.movie_catalog_embeddings = create_movie_catalog_embeddings()
         
-        train_history_df = self.read_ratings_to_df(self.ratings_dict['positive_train'])
+        cls.train_history_df = read_ratings_to_df(cls.ratings_dict['positive_train'])
         
-        self.movie_tiers_df = get_movie_tiers_df(train_history_df, pl.read_parquet(self.movies_path))
-        self.user_tiers_df = get_user_tiers_df(train_history_df, pl.read_parquet(self.users_path))
+        cls.movie_tiers_df = get_movie_tiers_df(cls.train_history_df, pl.read_parquet(cls.movies_path))
+        cls.user_tiers_df = get_user_tiers_df(cls.train_history_df, pl.read_parquet(users_path))
         
-        self.movie_indexer : ScannSearcher = Retriever.build_scann_searcher(embeddings=self.movie_catalog_embeddings,
-            top_k=self.top_k)
+        cls.movie_catalog_emb_indexer : ScannSearcher = Retriever.build_scann_searcher(embeddings=cls.movie_catalog_embeddings,
+            top_k=TestAnalysis.default_top_k)
         
-        self.output_dir = os.path.join(get_bin_dir(), "post_training_analysis")
-        self.output_conclusions_dict = dict()
-        
-    def tearDown(self):
-        output_summary = os.path.join(self.output_dir, "summary.json")
+        cls.summary_output_dir = os.path.join(get_bin_dir(), "post_training_analysis")
+        cls.summary_output_conclusions_dict = dict()
+    
+    @classmethod
+    def tearDownClass(cls):
+        output_summary = os.path.join(cls.summary_output_dir, "summary.json")
         with open(output_summary, "w") as f:
-            json.dump(self.output_conclusions_dict, f, indent=4)
+            json.dump(cls.summary_output_conclusions_dict, f, indent=4)
 
     def test_data_shifts(self):
-        output_file_path = os.path.join(self.output_dir, "data_shifts.json")
+        output_file_path = os.path.join(TestAnalysis.summary_output_dir, "data_shifts.json")
         
         res = dict()
         
-        movie_counts = [self.movie_tiers_df.select(pl.col("movie_tier").eq(t).sum()).item() for t in range(3)]
+        movie_counts = [TestAnalysis.movie_tiers_df.select(pl.col("movie_tier").eq(t).sum()).item() for t in range(3)]
         movie_fracs = self.normalize(movie_counts).tolist()
         for movie_tier in (0, 1, 2):
             res[f"movie_tier_{movie_tier}_catalog_counts"] = movie_counts[movie_tier]
@@ -139,15 +137,15 @@ class TestAnalysis(unittest.TestCase):
         
         # fraction of positive train, val, and test that are movie_tier
         for name in ["train", "val", "test"]:
-            df = self.read_ratings_to_df(self.ratings_dict[f'positive_{name}'])
-            df = df.join(self.movie_tiers_df, on="movie_id", how="left")
+            df = read_ratings_to_df(TestAnalysis.ratings_dict[f'positive_{name}'])
+            df = df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
             
             movie_counts = [df.select(pl.col("movie_tier").eq(t).sum()).item() for t in range(3)]
             movie_fracs = self.normalize(movie_counts).tolist()
             for movie_tier in (0, 1, 2):
                 res[f"movie_tier_{movie_tier}_{name}_counts"] = movie_counts[movie_tier]
         
-            df = df.join(self.user_tiers_df, on="user_id", how="left")
+            df = df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
             user_counts = [df.select(pl.col("user_tier").eq(t).sum()).item() for t in range(3)]
             user_fracs = self.normalize(user_counts).tolist()
             for user_tier in (0, 1, 2):
@@ -233,7 +231,7 @@ class TestAnalysis(unittest.TestCase):
         
         res["automated_conclusions"] = conclusions
         
-        self.output_conclusions_dict['data_shifts'] = conclusions
+        TestAnalysis.summary_output_conclusions_dict['data_shifts'] = conclusions
         
         #res = self.convert_to_native_types(res)
         
@@ -244,16 +242,16 @@ class TestAnalysis(unittest.TestCase):
 
     def test_stratified_metrics(self):
         
-        output_file_path = os.path.join(self.output_dir, "stratified_metrics.json")
+        output_file_path = os.path.join(TestAnalysis.summary_output_dir, "stratified_metrics.json")
         
         # pos_test_df is ground truth positives test dataset w/ columns: user_id, movie_id, rating, timestamp
-        pos_test_df = self.read_ratings_to_df( self.ratings_dict["positive_test"])
+        pos_test_df = read_ratings_to_df( TestAnalysis.ratings_dict["positive_test"])
         user_ids, timestamps = get_user_and_first_timestamp_from_ratings(pos_test_df)
         user_ids = np.expand_dims(user_ids, axis=1)
         timestamps = np.expand_dims(timestamps, axis=1)
         user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
         
-        pos_test_tiered = pos_test_df.join(self.movie_tiers_df, on="movie_id", how="left")
+        pos_test_tiered = pos_test_df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
         # Calculate ground-truth positive counts per user: overall and per tier
         user_gt_counts = pos_test_tiered.group_by("user_id").agg(
             pl.len().alias("total_positives"),
@@ -264,9 +262,9 @@ class TestAnalysis(unittest.TestCase):
         
         agg_res = dict()
         
-        for top_k in (20, self.top_k):
+        for top_k in (20, TestAnalysis.default_top_k):
         
-            catalog_size = self.model_dict['n_movies']
+            catalog_size = TestAnalysis.model_dict['n_movies']
             
             expected_random_recall = float(top_k)/float(catalog_size)
             
@@ -274,8 +272,8 @@ class TestAnalysis(unittest.TestCase):
             expected_random_dcg_part1 = sum([(1./np.log2(r + 1.)) for r in range(1, top_k+1)])/float(catalog_size)
             
             #np.ndarrays of shape (n_users, top_k)
-            neighbors, distances = self.movie_indexer.search_batched(queries=user_embeddings, final_num_neighbors=top_k)
-            neighbors += self.MOVIE_OFFSET
+            neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(queries=user_embeddings, final_num_neighbors=top_k)
+            neighbors += TestAnalysis.MOVIE_OFFSET
             #neighbors are the ANN search result top_k movie_ids
             
             retrieval_df = pl.DataFrame({
@@ -296,14 +294,14 @@ class TestAnalysis(unittest.TestCase):
             
             retrieval_df = retrieval_df.join(pos_test_df, on=["user_id", "movie_id"], how="left")
             # Join movie_tier metadata at the item level BEFORE user aggregation
-            retrieval_df = retrieval_df.join(self.movie_tiers_df, on="movie_id", how="left")
+            retrieval_df = retrieval_df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
             
             metrics_df = retrieval_df.group_by("user_id").agg(
                 pl.col("rating").is_not_null().sum().alias("hits_at_k"),
                 (1.0 / (pl.col("rank").filter(pl.col("rating").is_not_null()) + 1.0).log(2)).sum().alias("dcg_at_k")
             )
             # add column "user_tier":
-            metrics_df = metrics_df.join(self.user_tiers_df, on="user_id", how="left")
+            metrics_df = metrics_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
             # Calculate Native IDCG, NDCG, and Baselines
             metrics_df = metrics_df.join(user_pos_counts, on="user_id",
                 how="inner").with_columns(
@@ -482,7 +480,7 @@ class TestAnalysis(unittest.TestCase):
                     f"BALANCED ITEM TIER RANKING: NDCG performance remains consistent across movie tiers (Tier 0: {ndcg_mt0:.2%}, Tier 2: {ndcg_mt2:.2%}), indicating stable retrieval across popular and long-tail catalogs.")
             agg_res["automated_conclusions"] = conclusions
             
-            self.output_conclusions_dict[f'stratified_metrics@{top_k}'] = conclusions
+            TestAnalysis.summary_output_conclusions_dict[f'stratified_metrics@{top_k}'] = conclusions
         
         print(f'metrics\n={json.dumps(agg_res, indent=4)}')
         
@@ -495,7 +493,7 @@ class TestAnalysis(unittest.TestCase):
         then stratifying the results by movie_tier and user_tier.
         :return:
         """
-        out_dir = os.path.join(self.output_dir, "coverage")
+        out_dir = os.path.join(TestAnalysis.summary_output_dir, "coverage")
         shutil.rmtree(out_dir, ignore_errors=True)
         os.makedirs(out_dir, exist_ok=True)
         
@@ -503,23 +501,23 @@ class TestAnalysis(unittest.TestCase):
         
         agg_res = dict()
         
-        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
+        pos_test_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
         
         user_ids, timestamps = get_user_and_first_timestamp_from_ratings(pos_test_df)
         user_ids = np.expand_dims(user_ids, axis=1)
         timestamps = np.expand_dims(timestamps, axis=1)
         user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
         
-        for top_k in [self.top_k, 20]:
+        for top_k in [TestAnalysis.default_top_k, 20]:
             
-            if top_k == self.top_k:
-                indexer = self.movie_indexer
+            if top_k == TestAnalysis.default_top_k:
+                indexer = TestAnalysis.movie_catalog_emb_indexer
             else:
-                indexer = Retriever.build_scann_searcher(embeddings=self.movie_catalog_embeddings, top_k=top_k)
+                indexer = Retriever.build_scann_searcher(embeddings=TestAnalysis.movie_catalog_embeddings, top_k=top_k)
             
             res = dict()
             neighbors, distances = indexer.search_batched(user_embeddings)
-            neighbors += self.MOVIE_OFFSET
+            neighbors += TestAnalysis.MOVIE_OFFSET
             
             retrieval_df = pl.DataFrame({
                 "user_id": user_ids.squeeze(),
@@ -527,19 +525,19 @@ class TestAnalysis(unittest.TestCase):
             }).explode("movie_id")
             
             count = retrieval_df["movie_id"].n_unique()
-            cat_count = self.model_dict['n_movies']
+            cat_count = TestAnalysis.model_dict['n_movies']
             res["full_coverage"] = float(count)/float(cat_count)
             
             # count by movie_tier
-            retrieval_df = retrieval_df.join(self.movie_tiers_df, on="movie_id", how="left")  #adds column "movie_tier"
+            retrieval_df = retrieval_df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")  #adds column "movie_tier"
             for movie_tier in range(0, 3):
                 count = retrieval_df.filter(pl.col("movie_tier") == movie_tier)["movie_id"].n_unique()
-                cat_count = self.movie_tiers_df.filter(pl.col("movie_tier") == movie_tier)["movie_id"].count()
+                cat_count = TestAnalysis.movie_tiers_df.filter(pl.col("movie_tier") == movie_tier)["movie_id"].count()
                 res[f"movie_tier_{movie_tier}_coverage"] = float(count) / float(cat_count)
             
             #count by user_tier
-            retrieval_df = retrieval_df.join(self.user_tiers_df, on="user_id", how="left") #adds column "user_tier"
-            cat_count = self.model_dict['n_movies']
+            retrieval_df = retrieval_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left") #adds column "user_tier"
+            cat_count = TestAnalysis.model_dict['n_movies']
             for user_tier in range(0, 3):
                 count = retrieval_df.filter(pl.col("user_tier")==user_tier)["movie_id"].n_unique()
                 res[f"user_tier_{user_tier}_coverage"] = float(count) / (float(cat_count))
@@ -550,12 +548,12 @@ class TestAnalysis(unittest.TestCase):
                 for movie_tier in range(0, 3):
                     df2 = df.filter(pl.col("movie_tier") == movie_tier)
                     count = df2["movie_id"].n_unique()
-                    cat_count = self.movie_tiers_df.filter(pl.col("movie_tier") == movie_tier)["movie_id"].count()
+                    cat_count = TestAnalysis.movie_tiers_df.filter(pl.col("movie_tier") == movie_tier)["movie_id"].count()
                     res[f"user_tier_{user_tier}_movie_tier_{movie_tier}_coverage"] = float(count) / float(cat_count)
                     
             agg_res[f"coverage_k_{top_k}"] = res
             
-            if top_k != self.top_k:
+            if top_k != TestAnalysis.default_top_k:
                 #calc Gini coeff
                 res = dict()
                 # ------------------------------------------------------------------
@@ -572,7 +570,7 @@ class TestAnalysis(unittest.TestCase):
                 
                 # Must include catalog items with 0 retrievals to avoid underestimating inequality)
                 freq_df = (
-                    self.movie_tiers_df.select("movie_id", "movie_tier")
+                    TestAnalysis.movie_tiers_df.select("movie_id", "movie_tier")
                     .join(
                         retrieval_df.group_by("movie_id").agg(
                             pl.len().alias("retrieval_count")),
@@ -647,7 +645,7 @@ class TestAnalysis(unittest.TestCase):
                         
                         # Map those isolated retrievals onto the FULL movie catalog
                         user_tier_freq_df = (
-                            self.movie_tiers_df.select("movie_id")
+                            TestAnalysis.movie_tiers_df.select("movie_id")
                             .join(
                                 tier_retrieval_df.group_by("movie_id").agg(
                                     pl.len().alias("retrieval_count")),
@@ -740,7 +738,7 @@ class TestAnalysis(unittest.TestCase):
                 
                 res["automated_conclusions"] = conclusions
                 
-                self.output_conclusions_dict[f'coverage@{top_k}'] = conclusions
+                TestAnalysis.summary_output_conclusions_dict[f'coverage@{top_k}'] = conclusions
                 
                 agg_res[f"eval_k_{top_k}"] = res
                 
@@ -751,16 +749,16 @@ class TestAnalysis(unittest.TestCase):
     def test_popularity_bias(self):
         ## a.k.a. Macroscopic Amplification
         
-        output_file_path = os.path.join(self.output_dir, "popularity_bias.json")
+        output_file_path = os.path.join(TestAnalysis.summary_output_dir, "popularity_bias.json")
         
         agg_res = dict()
         
         # ======= stratified by user_tier ====================
-        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
-        pos_test_df = pos_test_df.join(self.user_tiers_df, on="user_id", how="left")
+        pos_test_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
+        pos_test_df = pos_test_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
         
         history_df = self.get_positive_ratings_history()
-        history_df = history_df.join(self.user_tiers_df, on="user_id", how="left")
+        history_df = history_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
         
         stratification_key = "user_tier"
         stratification_values = [0,1,2]
@@ -778,9 +776,9 @@ class TestAnalysis(unittest.TestCase):
             user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
         
             # neighbors shape is (n_samples, top_k).  these are both np.ndarray
-            neighbors, distances = self.movie_indexer.search_batched(user_embeddings)
+            neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
             #chk = full_movie_ids[neighbors]
-            neighbors += self.MOVIE_OFFSET
+            neighbors += TestAnalysis.MOVIE_OFFSET
             #are_equal = np.array_equal(chk, neighbors)
             
             tier_ground_truth_df = pos_test_df.filter(pl.col(stratification_key)==tier)
@@ -790,7 +788,7 @@ class TestAnalysis(unittest.TestCase):
                 neighbors=neighbors,  # shape: (n_users, top_k)
                 ground_truth_df = tier_ground_truth_df,  # Test set (positives only)
                 train_history_df = tier_history_df,  # Train set (positives only)
-                top_k = self.top_k,
+                top_k = TestAnalysis.default_top_k,
                 tag=f"{stratification_key}_{tier}"
             )
         
@@ -803,7 +801,7 @@ class TestAnalysis(unittest.TestCase):
     
     def test_embedding_hubness(self):
         
-        output_file_path = os.path.join(self.output_dir, "embedding_hubness.json")
+        output_file_path = os.path.join(TestAnalysis.summary_output_dir, "embedding_hubness.json")
         
         agg_res = dict()
         
@@ -822,13 +820,13 @@ class TestAnalysis(unittest.TestCase):
             sum_off_diag = np.sum(np.exp(-t_param * dist_sq)) - n
             return np.log(sum_off_diag / (n * (n - 1)))
         
-        global_item_uniformity = calc_uniformity(self.movie_catalog_embeddings.numpy())
+        global_item_uniformity = calc_uniformity(TestAnalysis.movie_catalog_embeddings.numpy())
         
         agg_res[f"Global Item Uniformity"] = global_item_uniformity
         
         #this is the test dataset of positive ratings
-        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
-        pos_test_df = pos_test_df.join(self.user_tiers_df, on="user_id", how="left")
+        pos_test_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
+        pos_test_df = pos_test_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
         #has "user_id", "movie_id", "rating", "timestamp", "user_tier"
         
         for user_tier in [0, 1, 2]:
@@ -845,8 +843,8 @@ class TestAnalysis(unittest.TestCase):
             u_np = user_embeddings.numpy()  # Shape: (N, emb_dim)
             
             # Fast Lookup of corresponding Movie Embeddings
-            # (Assuming your movie_catalog_embeddings index perfectly matches movie_id)
-            m_np = self.movie_catalog_embeddings.numpy()[pos_movie_ids - self.MOVIE_OFFSET]  # Shape: (N, emb_dim)
+            # (Assuming your TestAnalysis.movie_catalog_embeddings index perfectly matches movie_id)
+            m_np = TestAnalysis.movie_catalog_embeddings.numpy()[pos_movie_ids - TestAnalysis.MOVIE_OFFSET]  # Shape: (N, emb_dim)
             
             # 5User Uniformity
             tier_user_uniformity = calc_uniformity(u_np)
@@ -897,7 +895,7 @@ class TestAnalysis(unittest.TestCase):
     
         agg_res["automated_conclusions"] = conclusions
         
-        self.output_conclusions_dict["embeding_hubness"] = conclusions
+        TestAnalysis.summary_output_conclusions_dict["embeding_hubness"] = conclusions
         
         agg_res = self.convert_to_native_types(agg_res)
         print(f"Embedding Hubness:\n", json.dumps(agg_res, indent=4))
@@ -907,27 +905,27 @@ class TestAnalysis(unittest.TestCase):
     
     def test_plot_tsne_umap_movie_embeddings(self):
         
-        outdir = os.path.join(self.output_dir, "embedding_plots")
+        outdir = os.path.join(TestAnalysis.summary_output_dir, "embedding_plots")
         shutil.rmtree(outdir, ignore_errors=True)
         os.makedirs(outdir, exist_ok=True)
        
         #emb_movies_df = pl.DataFrame(
-        #    [(m_id, emb) for m_id, emb in zip(self.movie_ids.numpy().squeeze(), self.movie_catalog_embeddings.numpy())],
+        #    [(m_id, emb) for m_id, emb in zip(TestAnalysis.catalog_movie_ids.numpy().squeeze(), TestAnalysis.movie_catalog_embeddings.numpy())],
         #    schema=["movie_id", "embedding"],
         #    orient="row"
         #)
         emb_movies_df = pl.DataFrame({
-            "movie_id": self.movie_ids.numpy().squeeze(),
-            "embedding": self.movie_catalog_embeddings.numpy()
+            "movie_id": TestAnalysis.catalog_movie_ids.numpy().squeeze(),
+            "embedding": TestAnalysis.movie_catalog_embeddings.numpy()
         })
-        emb_movies_df = emb_movies_df.join(self.movie_tiers_df, on="movie_id", how="left")
+        emb_movies_df = emb_movies_df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
         
         self.plot_embeddings_umap_tsne(emb_movies_df, outdir, "all_movies",
             stratified_key="movie_tier")
         
     def test_inter_list_diversity(self):
         
-        output_file_path = os.path.join(self.output_dir, "interlist_diversity.json")
+        output_file_path = os.path.join(TestAnalysis.summary_output_dir, "interlist_diversity.json")
         
         agg_res = dict()
         
@@ -937,12 +935,12 @@ class TestAnalysis(unittest.TestCase):
         
         n_samples = 500
         
-        num_catalog_movies = self.model_dict['n_movies']
+        num_catalog_movies = TestAnalysis.model_dict['n_movies']
         
         # ========= random sample of all users ==========================
         
-        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
-        pos_test_df = pos_test_df.join(self.user_tiers_df, on="user_id", how="left")
+        pos_test_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
+        pos_test_df = pos_test_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
         (user_ids, timestamps) = get_random_user_and_first_timestamp_from_ratings(pos_test_df, n_samples)
         user_ids = np.expand_dims(user_ids, axis=1)
         timestamps = np.expand_dims(timestamps, axis=1)
@@ -950,7 +948,7 @@ class TestAnalysis(unittest.TestCase):
         user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps) #tf.Tensor shape (5096, 32)
        
         #neighbors shape is (n_samples, top_k)
-        neighbors, distances = self.movie_indexer.search_batched(user_embeddings)
+        neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
         
         ## if the dataset samle were > 100_000, we could MinHash to conserve memory
         ## instead of the fast vectorized matrices with BLAS optimization that
@@ -960,7 +958,7 @@ class TestAnalysis(unittest.TestCase):
         )
         
         res = self.analyze_inter_user_diversity(mean_jaccard, num_catalog_movies,
-            self.top_k, "all_users",
+            TestAnalysis.default_top_k, "all_users",
             baseline_jaccard = None
         )
         
@@ -983,12 +981,12 @@ class TestAnalysis(unittest.TestCase):
             timestamps = np.expand_dims(timestamps, axis=1)
             user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
             # neighbors shape is (n_samples, top_k)
-            neighbors, distances = self.movie_indexer.search_batched(user_embeddings)
+            neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
             inter_user_diversity, mean_jaccard = self.calculate_exact_inter_user_diversity(
                 neighbors, num_catalog_movies
             )
             res = self.analyze_inter_user_diversity(mean_jaccard,
-                num_catalog_movies, self.top_k, f"tier_{tier}",
+                num_catalog_movies, TestAnalysis.default_top_k, f"tier_{tier}",
                 baseline_jaccard=None
             )
             
@@ -996,8 +994,8 @@ class TestAnalysis(unittest.TestCase):
             
         # ===== cold start movies, adding 501 movies to the movie catalog (501 because its between 10-15% of catalog size and is 167 per movie tier) =====
         (new_movie_ids, new_movie_embeddings) = self.get_cold_start_movies(pos_test_df)
-        full_movie_embeddings = tf.concat([self.movie_catalog_embeddings, new_movie_embeddings], axis=0)
-        indexer = Retriever.build_scann_searcher(embeddings=full_movie_embeddings, top_k=self.top_k)
+        full_movie_embeddings = tf.concat([TestAnalysis.movie_catalog_embeddings, new_movie_embeddings], axis=0)
+        indexer = Retriever.build_scann_searcher(embeddings=full_movie_embeddings, top_k=TestAnalysis.default_top_k)
         
         num_catalog_movies += len(new_movie_ids)
         
@@ -1015,7 +1013,7 @@ class TestAnalysis(unittest.TestCase):
         )
         
         res = self.analyze_inter_user_diversity(mean_jaccard,
-            num_catalog_movies, self.top_k, "all_users_but_catalog_has_cold_start_movies",
+            num_catalog_movies, TestAnalysis.default_top_k, "all_users_but_catalog_has_cold_start_movies",
             baseline_jaccard=None
         )
         
@@ -1028,11 +1026,11 @@ class TestAnalysis(unittest.TestCase):
     
     def test_intra_list_diversity(self):
         
-        output_file_path = os.path.join(self.output_dir, "intralist_diversity.json")
+        output_file_path = os.path.join(TestAnalysis.summary_output_dir, "intralist_diversity.json")
 
         agg_res = dict()
         
-        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
+        pos_test_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
         first_interactions_df = pos_test_df.group_by("user_id").agg(pl.col("timestamp").min())
         user_ids = first_interactions_df["user_id"].to_numpy()
         print(f'n unique users in test ds={len(user_ids)}')
@@ -1041,13 +1039,13 @@ class TestAnalysis(unittest.TestCase):
         timestamps = np.expand_dims(timestamps, axis=1)
         user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps) #tf.Tensor shape (5096, 32)
         
-        neighbors, distances = self.movie_indexer.search_batched(user_embeddings)
+        neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
         if isinstance(neighbors, np.ndarray):
             neighbors = tf.convert_to_tensor(neighbors, dtype=tf.int32)
         
-        res = self.calculate_batched_intra_list_diversity(neighbors, self.movie_catalog_embeddings)
+        res = self.calculate_batched_intra_list_diversity(neighbors, TestAnalysis.movie_catalog_embeddings)
         
-        print(f"Average Intra-List Diversity @ {self.top_k}\n: {json.dumps(res, indent=4)}")
+        print(f"Average Intra-List Diversity @ {TestAnalysis.default_top_k}\n: {json.dumps(res, indent=4)}")
         
         with open(output_file_path, "w") as f:
             json.dump(res, f, indent=4)
@@ -1079,9 +1077,9 @@ class TestAnalysis(unittest.TestCase):
           If your Recall@K plummets for these dropped-out items, your model relies too heavily
           on interaction IDs and has weak content representations.
         """
-        output_file_path = os.path.join(self.output_dir, "cold-start-recalls.json")
+        output_file_path = os.path.join(TestAnalysis.summary_output_dir, "cold-start-recalls.json")
         
-        pos_test_df = self.read_ratings_to_df(self.ratings_dict["positive_test"])
+        pos_test_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
         #[user_id, movie_id, rating, timestamp, movie_tier]
         pos_test_df = self.join_df_to_movie_tiers(pos_test_df)
         
@@ -1108,47 +1106,47 @@ class TestAnalysis(unittest.TestCase):
         timestamps = first_interactions_df["timestamp"].to_numpy()
         timestamps = np.expand_dims(timestamps, axis=1)
         
-        id0 = self.movie_id_range_incl[-1] + 1
+        id0 = TestAnalysis.movie_id_range_incl[-1] + 1
         new_movie_ids = np.array([i for i in range(id0, id0 + len(original_movie_ids))])
         
         original_movie_ids = np.expand_dims(original_movie_ids, axis=1)
         new_movie_ids = np.expand_dims(new_movie_ids, axis=1)
         
-        original_inputs = self.movie_data.get_movie(original_movie_ids)
+        original_inputs = TestAnalysis.movie_data.get_movie(original_movie_ids)
         new_inputs = original_inputs.copy()
         new_inputs["movie_id"] = tf.constant(new_movie_ids)
         
-        #original_embeddings : tf.Tensor = self._create_movie_embeddings_batch(original_inputs)
-        new_embeddings : tf.Tensor = self._create_movie_embeddings_batch(new_inputs)
+        #original_embeddings : tf.Tensor = _create_movie_embeddings_batch(original_inputs)
+        new_embeddings : tf.Tensor = _create_movie_embeddings_batch(new_inputs)
         new_embeddings = new_embeddings.numpy()
         
-        full_movie_embeddings = self.movie_catalog_embeddings.numpy()
+        full_movie_embeddings = TestAnalysis.movie_catalog_embeddings.numpy()
         
         #for each new_movie_ids, replace with embedding for new_movie_ids.
         #this not only subtracts the old and inserts the new, but gives them the same index so that they
         # are findable when compared to the ground truth ratings.
         for i, m_id in enumerate(original_movie_ids):
-            idx = m_id[0] - self.MOVIE_OFFSET
-            assert(self.movie_ids[idx].numpy().item() == m_id[0])
+            idx = m_id[0] - TestAnalysis.MOVIE_OFFSET
+            assert(TestAnalysis.catalog_movie_ids[idx].numpy().item() == m_id[0])
             full_movie_embeddings[idx] = new_embeddings[i]
             
-        top_k = self.top_k
+        top_k = TestAnalysis.default_top_k
         
         new_indexer = Retriever.build_scann_searcher(embeddings=full_movie_embeddings, top_k=top_k)
     
         #retrieve
         user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
         
-        orig_neighbors, orig_distances = self.movie_indexer.search_batched(user_embeddings)
+        orig_neighbors, orig_distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
         new_neighbors, new_distances = new_indexer.search_batched(user_embeddings)
         
-        orig_results = self.evaluate_retrieval_with_tier_share(user_ids, orig_neighbors, self.MOVIE_OFFSET, candidate_pool_df, self.movie_tiers_df, top_k=top_k)
-        new_results = self.evaluate_retrieval_with_tier_share(user_ids, new_neighbors, self.MOVIE_OFFSET, candidate_pool_df, self.movie_tiers_df, top_k=top_k)
+        orig_results = self.evaluate_retrieval_with_tier_share(user_ids, orig_neighbors, TestAnalysis.MOVIE_OFFSET, candidate_pool_df, TestAnalysis.movie_tiers_df, top_k=top_k)
+        new_results = self.evaluate_retrieval_with_tier_share(user_ids, new_neighbors, TestAnalysis.MOVIE_OFFSET, candidate_pool_df, TestAnalysis.movie_tiers_df, top_k=top_k)
 
         print("results on test set:\n", json.dumps(orig_results, indent=4))
         print("results on test set cold start:\n", json.dumps(new_results, indent=4))
         
-        res = self.compare_retrieval_runs(orig_results, new_results, top_k, self.model_dict["n_movies"], "test set", "cold-start set")
+        res = self.compare_retrieval_runs(orig_results, new_results, top_k, TestAnalysis.model_dict["n_movies"], "test set", "cold-start set")
         print("comparisons:\n", json.dumps(res, indent=4))
         
         with open(output_file_path, "w") as f:
@@ -1212,7 +1210,7 @@ class TestAnalysis(unittest.TestCase):
         #      popularity bias : if user_retr_avg is consistently > user_gt_avg
         # Build the Log-Popularity Map from Historical Training Data
         # Calculate log2(1 + count) for every movie
-        pop_df = (train_history_df.group_by("movie_id")
+        pop_df = (TestAnalysis.train_history_df.group_by("movie_id")
             .agg(pl.len().alias("raw_count"))
             .with_columns(
                 pl.col("raw_count").map_elements(lambda x: np.log2(1 + x),
@@ -1277,7 +1275,7 @@ class TestAnalysis(unittest.TestCase):
                 f"Retrieved item popularity aligns closely with ground truth behavior."
             )
             
-        self.output_conclusions_dict[f"{tag}_popularity_bias"] = conclusions
+        TestAnalysis.summary_output_conclusions_dict[f"{tag}_popularity_bias"] = conclusions
         
         return {
             f"{tag}_metrics": {
@@ -1433,7 +1431,7 @@ class TestAnalysis(unittest.TestCase):
                     f"({baseline_jaccard * 100:.2f}% vs {mean_jaccard * 100:.2f}%)."
                 )
         
-        self.output_conclusions_dict[f"{dict_tag}_inter_user_diversity_conclusions"] = conclusions
+        TestAnalysis.summary_output_conclusions_dict[f"{dict_tag}_inter_user_diversity_conclusions"] = conclusions
         
         return {
             f"{dict_tag}_inter_user_diversity_metrics": metrics,
@@ -1620,7 +1618,7 @@ class TestAnalysis(unittest.TestCase):
                 f"Candidates span multiple distinct semantic regions in the embedding space."
             )
             
-        self.output_conclusions_dict["intra-list divserity"] = conclusions
+        TestAnalysis.summary_output_conclusions_dict["intra-list divserity"] = conclusions
         
         return {
             "model_ild": round(model_ild, 6),
@@ -1643,18 +1641,18 @@ class TestAnalysis(unittest.TestCase):
             
         original_movie_ids = candidate_pool_df["movie_id"].unique().to_numpy()
         
-        id0 = self.movie_id_range_incl[-1] + 1
+        id0 = TestAnalysis.movie_id_range_incl[-1] + 1
         new_movie_ids = np.array([i for i in range(id0, id0 + len(original_movie_ids))])
         
         original_movie_ids = np.expand_dims(original_movie_ids, axis=1)
         new_movie_ids = np.expand_dims(new_movie_ids, axis=1)
         
-        original_inputs = self.movie_data.get_movie(original_movie_ids)
+        original_inputs = TestAnalysis.movie_data.get_movie(original_movie_ids)
         new_inputs = original_inputs.copy()
         new_inputs["movie_id"] = tf.constant(new_movie_ids)
         
-        # original_embeddings : tf.Tensor = self._create_movie_embeddings_batch(original_inputs)
-        new_embeddings: tf.Tensor = self._create_movie_embeddings_batch(new_inputs)
+        # original_embeddings : tf.Tensor = _create_movie_embeddings_batch(original_inputs)
+        new_embeddings: tf.Tensor = _create_movie_embeddings_batch(new_inputs)
         
         new_movie_ids = tf.convert_to_tensor(new_movie_ids, dtype=tf.int32)
         
@@ -1784,7 +1782,7 @@ class TestAnalysis(unittest.TestCase):
             f"Top-{top_k} candidate slates consist of {t0_share * 100:.1f}% Tier 0, {t1_share * 100:.1f}% Tier 1, and {t2_share * 100:.1f}% Tier 2 items."
         )
         
-        self.output_conclusions_dict['cold_start_embeddings'] = conclusions
+        TestAnalysis.summary_output_conclusions_dict['cold_start_embeddings'] = conclusions
         
         return {
             "expected_random_recall": round(expected_random_recall, 6),
@@ -1795,7 +1793,7 @@ class TestAnalysis(unittest.TestCase):
     def evaluate_retrieval_with_tier_share(self,
             user_ids: np.ndarray,  # shape: (325,)
             neighbors: np.ndarray,  # shape: (325, top_k)
-            movie_offset: int,  # self.MOVIE_OFFSET
+            movie_offset: int,  # TestAnalysis.MOVIE_OFFSET
             ground_truth_df: pl.DataFrame, # columns: user_id, movie_id, rating, timestamp, tier
             movie_tiers_df: pl.DataFrame, # columns: movie_id, tier (for catalog-wide lookup)
             top_k: int = 20
@@ -1807,7 +1805,7 @@ class TestAnalysis(unittest.TestCase):
         
         # Map catalog movie_id -> tier for checking retrieved candidate distribution
         catalog_tier_map = dict(
-            movie_tiers_df.select(["movie_id", "movie_tier"]).rows()
+            TestAnalysis.movie_tiers_df.select(["movie_id", "movie_tier"]).rows()
         )
         
         # Group ground truth items and their tiers per user
@@ -1885,23 +1883,6 @@ class TestAnalysis(unittest.TestCase):
         
         return results
     
-    def _create_movie_embeddings_batch(self, inputs : Dict) -> tf.Tensor:
-        
-        """
-        inputs = \
-            {'movie_id': tf.constant([[6041], [6042], [6043]], dtype=tf.int64),
-                'genres': tf.constant([["Animation|Children's|Comedy"], ["Adventure|Children's|Fantasy"], ["Comedy|Romance"]], dtype=tf.string),
-
-        """
-        self.loaded_user_movie_model = tf.saved_model.load(self.user_movie_models_dir)
-        infer_for_dict = self.loaded_user_movie_model.signatures["serving_candidate_dict"]
-        output_keyword = list(infer_for_dict.structured_outputs.keys())[0]
-        embeddings_list = infer_for_dict(
-            movie_id=inputs['movie_id'],
-            genres=inputs['genres'])
-        embeddings_list = embeddings_list[output_keyword]
-        return embeddings_list
-    
     def create_movie_embeddings_batch(self, movie_ids: Union[tf.Tensor, np.ndarray]):
         
         """
@@ -1910,8 +1891,8 @@ class TestAnalysis(unittest.TestCase):
                 'genres': tf.constant([["Animation|Children's|Comedy"], ["Adventure|Children's|Fantasy"], ["Comedy|Romance"]], dtype=tf.string),
         
         """
-        inputs = self.movie_data.get_movie(movie_ids)
-        return self._create_movie_embeddings_batch(inputs)
+        inputs = TestAnalysis.movie_data.get_movie(movie_ids)
+        return _create_movie_embeddings_batch(inputs)
     
     def create_user_embeddings_batch(self, user_ids: Union[tf.Tensor, np.ndarray],
             timestamps:Union[tf.Tensor, np.ndarray]) -> tf.Tensor:
@@ -1924,9 +1905,8 @@ class TestAnalysis(unittest.TestCase):
                 'timestamp': tf.constant([[ts], [ts], [ts]], dtype=tf.int64),
             }
         """
-        inputs = self.user_data.get_user(user_id = user_ids, timestamp = timestamps)
-        self.loaded_user_movie_model = tf.saved_model.load(self.user_movie_models_dir)
-        infer_for_dict = self.loaded_user_movie_model.signatures["serving_query_dict"]
+        inputs = TestAnalysis.user_data.get_user(user_id = user_ids, timestamp = timestamps)
+        infer_for_dict = TestAnalysis.loaded_user_movie_model.signatures["serving_query_dict"]
         output_keyword = list(infer_for_dict.structured_outputs.keys())[0]
         embeddings_list = infer_for_dict(
             age=inputs['age'],
@@ -1936,13 +1916,7 @@ class TestAnalysis(unittest.TestCase):
             user_id=inputs['user_id']
         )[output_keyword]
         return embeddings_list
-        
-    def read_model_assets_hparams(self, user_movie_models_dir) -> dict[str, Any]:
-        file_path = os.path.join(user_movie_models_dir, "assets.extra/hyperparameters.json")
-        with open(file_path, 'r', encoding='utf-8') as f:
-            hyperparameters = json.load(f)['values']
-            return hyperparameters
-        
+    
     def _parse_tfrecord(self, proto, em_feature_spec):
         parsed = tf.io.parse_single_example(proto, em_feature_spec)
         #return parsed['movie_id'], parsed['embedding']
@@ -1960,30 +1934,8 @@ class TestAnalysis(unittest.TestCase):
         return emb_df
     
     def join_df_to_movie_tiers(self, df: pl.DataFrame) -> pl.DataFrame:
-        return df.join(self.movie_tiers_df, on='movie_id', how='left')
+        return df.join(TestAnalysis.movie_tiers_df, on='movie_id', how='left')
         
-    def read_ratings_to_df(self, file_path:str, batch_size:int=2048) -> pl.DataFrame:
-        if not os.path.exists(file_path):
-            raise Exception(f'file not found: {file_path}')
-        records = []
-        reader = None
-        try:
-            reader = array_record_module.ArrayRecordReader(file_path)
-            n = reader.num_records()
-            for i in range(0, n, batch_size):
-                i_end = i + batch_size
-                if i_end >= n:
-                    i_end = n
-                batch_bytes = reader.read([x for x in range(i, i_end)]) # a single list of encodings, each being a list of 4 integers
-                data = [msgpack.unpackb(b, use_list=False) for b in batch_bytes] # list of tuples of 4 integers
-                for record in data:
-                    records.append({'user_id': int(record[0]), 'movie_id': int(record[1]),
-                        'rating': int(record[2]), 'timestamp': int(record[3])})
-        finally:
-            if reader is not None:
-                reader.close()
-        return pl.DataFrame(records)
-    
     def plot_embeddings_umap_tsne(self, joined_df, outdir: str, file_tag: str,
         stratified_key: str = "tier"):
         
@@ -2043,22 +1995,10 @@ class TestAnalysis(unittest.TestCase):
 
     def get_positive_ratings_history(self) -> pl.DataFrame:
         r = []
-        for file_path in self.ratings_dict["positive_history"]:
-            ratings_df = self.read_ratings_to_df(file_path)
+        for file_path in TestAnalysis.ratings_dict["positive_history"]:
+            ratings_df = read_ratings_to_df(file_path)
             r.append(ratings_df)
         return pl.concat(r)
-    
-    def create_movie_catalog_embeddings(self) -> Tuple[tf.Tensor,  tf.Tensor]:
-        
-        df = pl.read_parquet(self.movies_path)
-        df = df.sort('movie_id')
-        movie_ids = np.expand_dims(df['movie_id'].to_numpy(), axis=1)
-        movie_ids = tf.constant(movie_ids, name='movie_id', dtype=tf.int64)
-        
-        inputs = self.movie_data.get_movie(movie_ids)
-        embeddings: tf.Tensor = self._create_movie_embeddings_batch(inputs)
-        
-        return movie_ids, embeddings
     
     def plot_lorenz_curve(self, lorenz_array, top_k, gini_score, out_file_path):
         """Plots the Lorenz curve of recommendation distribution."""
@@ -2098,6 +2038,64 @@ class TestAnalysis(unittest.TestCase):
         
         plt.savefig(out_file_path, dpi=300, bbox_inches="tight")
         plt.close()
+    
+
+def read_ratings_to_df(file_path:str, batch_size:int=2048) -> pl.DataFrame:
+    if not os.path.exists(file_path):
+        raise Exception(f'file not found: {file_path}')
+    records = []
+    reader = None
+    try:
+        reader = array_record_module.ArrayRecordReader(file_path)
+        n = reader.num_records()
+        for i in range(0, n, batch_size):
+            i_end = i + batch_size
+            if i_end >= n:
+                i_end = n
+            batch_bytes = reader.read([x for x in range(i, i_end)]) # a single list of encodings, each being a list of 4 integers
+            data = [msgpack.unpackb(b, use_list=False) for b in batch_bytes] # list of tuples of 4 integers
+            for record in data:
+                records.append({'user_id': int(record[0]), 'movie_id': int(record[1]),
+                    'rating': int(record[2]), 'timestamp': int(record[3])})
+    finally:
+        if reader is not None:
+            reader.close()
+    return pl.DataFrame(records)
+    
+def create_movie_catalog_embeddings() -> Tuple[tf.Tensor, tf.Tensor]:
+    
+    df = pl.read_parquet(TestAnalysis.movies_path)
+    df = df.sort('movie_id')
+    movie_ids = np.expand_dims(df['movie_id'].to_numpy(), axis=1)
+    movie_ids = tf.constant(movie_ids, name='movie_id', dtype=tf.int64)
+    
+    inputs = TestAnalysis.movie_data.get_movie(movie_ids)
+    embeddings: tf.Tensor = _create_movie_embeddings_batch(inputs)
+    
+    return movie_ids, embeddings
+
+def read_model_assets_hparams(a_user_movie_models_dir) -> dict[str, Any]:
+    file_path = os.path.join(a_user_movie_models_dir,
+        "assets.extra/hyperparameters.json")
+    with open(file_path, 'r', encoding='utf-8') as f:
+        hyperparameters = json.load(f)['values']
+        return hyperparameters
+    
+def _create_movie_embeddings_batch(inputs: Dict) -> tf.Tensor:
+    """
+    inputs = \
+        {'movie_id': tf.constant([[6041], [6042], [6043]], dtype=tf.int64),
+            'genres': tf.constant([["Animation|Children's|Comedy"], ["Adventure|Children's|Fantasy"], ["Comedy|Romance"]], dtype=tf.string),
+
+    """
+    infer_for_dict = TestAnalysis.loaded_user_movie_model.signatures[
+        "serving_candidate_dict"]
+    output_keyword = list(infer_for_dict.structured_outputs.keys())[0]
+    embeddings_list = infer_for_dict(
+        movie_id=inputs['movie_id'],
+        genres=inputs['genres'])
+    embeddings_list = embeddings_list[output_keyword]
+    return embeddings_list
 
 if __name__ == '__main__':
     unittest.main()

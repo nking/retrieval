@@ -70,9 +70,11 @@ class TestAnalysis(unittest.TestCase):
                     os.path.join(test_res_dir, "ratings_val_liked.array_record")
                 ],
             "positive_train": os.path.join(test_res_dir, "ratings_train_liked.array_record"),
-            "positive_val": os.path.join(test_res_dir,
-                "ratings_val_liked.array_record"),
+            "positive_val": os.path.join(test_res_dir, "ratings_val_liked.array_record"),
             "positive_test": os.path.join(test_res_dir, "ratings_test_liked.array_record"),
+            "train": os.path.join(test_res_dir, "ratings_train.array_record"),
+            "val": os.path.join(test_res_dir, "ratings_val.array_record"),
+            "test": os.path.join(test_res_dir, "ratings_test.array_record"),
         }
         
         emb_movie_feature_spec = {
@@ -128,15 +130,44 @@ class TestAnalysis(unittest.TestCase):
         
         res = dict()
         
+        # a look at P(X,Y) where X = features, Y = label
+        ## and its factors  P(X), P(X|Y), P(Y), P(Y|X)
+        
+        #movie_tiers_df is a dataframe of the entire movie_catalog with columns movie_id, movie_tier where movie_tier=0,1 or 2
         movie_counts = [TestAnalysis.movie_tiers_df.select(pl.col("movie_tier").eq(t).sum()).item() for t in range(3)]
         movie_fracs = self.normalize(movie_counts).tolist()
         for movie_tier in (0, 1, 2):
             res[f"movie_tier_{movie_tier}_catalog_counts"] = movie_counts[movie_tier]
-            
+    
         res["movie_tier_catalog_distribution"] = movie_fracs
         
-        # fraction of positive train, val, and test that are movie_tier
+        ## calc P(X) : for each full train, val, test count total pos+neg for each movie_tier and normalize, then calc emds
+        ## calc P(Y|X) : for each full train, val, test count for each movie_tier (#pos)/(#pos + #neg), normalize then calc emds
+        ## calc P(Y) : for each full train, val, test count total positives/total ratings
+        ## calc P(X|Y) : only calculating for Y=1 which are the positives.  for each positive train, val, test count
+        ##                movie_tier and normalize, then calc EMDs
         for name in ["train", "val", "test"]:
+            #each ratings dataframe here has columns "user_id", "movie_id", "rating", "timestamp"
+            df = read_ratings_to_df(TestAnalysis.ratings_dict[f'{name}'])
+            # movie_tiers_df is a dataframe of the entire movie_catalog with columns movie_id, movie_tier where movie_tier=0,1 or 2
+            df = df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
+            movie_counts = [df.select(pl.col("movie_tier").eq(t).sum()).item() for t in range(3)]
+            movie_fracs = self.normalize(movie_counts).tolist()
+            res[f"P_X_{name}"] = movie_fracs
+            
+            pos_movie_counts = [(df.select(pl.col("rating").ge(3) & pl.col("movie_tier").eq(t)).sum()).item() for t in range(3)]
+            hit_rates = [
+                p / m if m > 0 else 0.0
+                for p, m in zip(pos_movie_counts, movie_counts)
+            ]
+            norm_hit_rates = self.normalize(hit_rates).tolist()
+            res[f"P_Y|X_{name}"] = norm_hit_rates
+            
+            pos_movie_counts = (df.select( pl.col("rating").ge(3) ).sum()).item()
+            movie_counts = (df.select(pl.col("movie_id")).sum()).item()
+            res[f"P_Y_{name}"] = pos_movie_counts / movie_counts
+            
+            #P(X|Y=1) stratified by movie_tier
             df = read_ratings_to_df(TestAnalysis.ratings_dict[f'positive_{name}'])
             df = df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
             
@@ -144,7 +175,10 @@ class TestAnalysis(unittest.TestCase):
             movie_fracs = self.normalize(movie_counts).tolist()
             for movie_tier in (0, 1, 2):
                 res[f"movie_tier_{movie_tier}_{name}_counts"] = movie_counts[movie_tier]
+            res[f"P_X|Y1_{name}"] = movie_fracs
         
+            # #P(X|Y=1) stratified by user_tier
+            #user_tiers_df is a polars dataframe of the full user catalog.  it has columns "user_id", "user_tier"
             df = df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
             user_counts = [df.select(pl.col("user_tier").eq(t).sum()).item() for t in range(3)]
             user_fracs = self.normalize(user_counts).tolist()
@@ -154,12 +188,25 @@ class TestAnalysis(unittest.TestCase):
             res[f"movie_tier_{name}_distribution"] = movie_fracs
             res[f"user_tier_{name}_distribution"] = user_fracs
         
-        #compare the data distributions.
+        # compare the data distributions.
         # because the tiers are ordinal, we can use the Wasserstein distance (a.k.a. Earth Mover's Distance)
         # EMDs will be in range [0,1]
         #    where 0 is no difference
         #          1 is polar opposite piling of mass in the distributions
         
+        movie_pairs = [
+            ("train", "val"),
+            ("val", "test"),
+            ("train", "test"),
+        ]
+        for name_a, name_b in movie_pairs:
+            p = res[f"P_X_{name_a}"]
+            q = res[f"P_X_{name_b}"]
+            res[f"P_X_emd_{name_a}_to_{name_b}"] = self.calc_earth_mover_distances(p, q)
+            p = res[f"P_Y|X_{name_a}"]
+            q = res[f"P_Y|X_{name_b}"]
+            res[f"P_Y|X_emd_{name_a}_to_{name_b}"] = self.calc_earth_mover_distances(p, q)
+       
         # Pairwise Movie Tier EMDs
         movie_pairs = [
             ("train", "val"),
@@ -187,6 +234,7 @@ class TestAnalysis(unittest.TestCase):
         
         # Rule 1: Movie Tier Split Drift (Train vs Val/Test)
         max_m_split_drift = max(m_train_to_val, m_train_to_test)
+        
         if max_m_split_drift < 0.015:
             conclusions.append(
                 f"MOVIE TIER STABILITY EXCELLENT: Minimal drift across dataset splits (Train-Test EMD: "
@@ -229,6 +277,58 @@ class TestAnalysis(unittest.TestCase):
                 f"UNUSUAL UNIFORM CATALOG COVERAGE: Catalog vs. Train EMD is low ({cat_tr_emd:.4f}), indicating interactions are surprisingly evenly spread across all item tiers."
             )
         
+        ## ===========================
+        p_x_train_to_val = res[f'P_X_emd_train_to_val']
+        p_x_train_to_test = res[f'P_X_emd_train_to_test']
+        p_y_x_train_to_val = res[f'P_Y|X_emd_train_to_val']
+        p_y_x_train_to_test = res[f'P_Y|X_emd_train_to_test']
+        p_y_train_to_val = abs(res['P_Y_train'] - res['P_Y_val'])
+        p_y_train_to_test = abs(res['P_Y_train'] - res['P_Y_test'])
+        p_x_y_train_to_val = res[f'movie_tier_emd_train_to_val']
+        p_x_y_train_to_test = res[f'movie_tier_emd_train_to_test']
+        tags = ["P_X", "P_Y|X", "P_Y", "P_X|Y"]
+        tvs = [p_x_train_to_val,  p_y_x_train_to_val,  p_y_train_to_val, p_x_y_train_to_val]
+        tts = [p_x_train_to_test, p_y_x_train_to_test, p_y_train_to_test, p_x_y_train_to_test]
+        for tag, tv, tt in zip(tags, tvs, tts):
+            max_split_drift = max(tv, tt)
+            if max_split_drift < 0.015:
+                conclusions.append(
+                    f"{tag} MOVIE TIER STABILITY EXCELLENT: Activity profile distribution remains consistent across splits (Train-Test EMD: {tt:.4f})."
+                )
+            elif max_split_drift < 0.04:
+                conclusions.append(
+                    f"{tag} MOVIE TIER MODERATE DRIFT: Slight popularity shift across splits (Train-Test EMD: {tt:.4f})."
+                )
+            else:
+                conclusions.append(
+                    f"{tag} MOVIE TIER HIGH DRIFT WARNING: Significant item popularity shift between Train and Test splits (Train-Test EMD: {tt:.4f})."
+                )
+        
+        # covariate shift P(X)_changed * P(Y|X)_unchanged
+        # manifestation shift P(Y)_unchanged * P(X|Y)_changed
+        # label shift P(Y)_changed * P(X|Y)_unchanged
+        # concept shift covariate shift P(X)_unchanged * P(Y|X)_changed
+        covariate_shift = False
+        label_shift = False
+        if max(p_x_train_to_val, p_x_train_to_test) >= 0.015 and max(p_y_x_train_to_val, p_y_x_train_to_test) < 0.015:
+            conclusions.append(
+                f"Covariate shift between Train and Test splits."
+            )
+            covariate_shift = True
+        if max(p_y_train_to_val, p_y_train_to_test) >= 0.015 and max(p_x_y_train_to_val, p_x_y_train_to_test) < 0.015:
+            conclusions.append(
+                f"Label shift between Train and Test splits."
+            )
+            label_shift = True
+        if not label_shift and (p_x_train_to_val, p_x_train_to_test) < 0.015 and max(p_y_x_train_to_val, p_y_x_train_to_test) >= 0.015:
+            conclusions.append(
+                f"Concept shift between Train and Test splits."
+            )
+        if not covariate_shift and max(p_y_train_to_val, p_y_train_to_test) < 0.015 and max(p_x_y_train_to_val, p_x_y_train_to_test) >= 0.015:
+            conclusions.append(
+                f"Manifestation shift between Train and Test splits."
+            )
+            
         res["automated_conclusions"] = conclusions
         
         TestAnalysis.summary_output_conclusions_dict['data_shifts'] = conclusions

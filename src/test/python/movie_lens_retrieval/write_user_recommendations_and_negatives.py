@@ -1,11 +1,20 @@
 import os.path
 import unittest
-from typing import Dict
+from typing import Dict, Tuple
 import numpy as np
 from array_record.python import array_record_module
 import msgpack
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+import sys
+is_cli = __name__ == '__main__' or any('unittest' in arg for arg in sys.argv)
+if is_cli:
+    print('** running from CLI **', flush=True)
+    sys.path.insert(0,
+        os.path.join(os.getcwd(), "src/test/python/movie_lens_retrieval"))
+    sys.path.insert(0,
+        os.path.join(os.getcwd(), "src/main/python/movie_lens_retrieval"))
 
 from helper import *
 from movie_lens_retrieval.Retriever import Retriever, EmbeddingType
@@ -13,17 +22,20 @@ from movie_lens_retrieval.Retriever import Retriever, EmbeddingType
 class TestRetrieval(unittest.TestCase):
     def setUp(self):
         
-        saved_models_dir = os.path.join(get_project_dir(),
-            "src/main/resources/serving_models")
-        self.user_movie_models_dir = os.path.join(saved_models_dir,
-            "user_movie_model")
+        self.user_movie_models_dir = os.environ.get("SAVED_MODEL_DIR",
+            os.path.join(get_project_dir(),
+                "src/main/resources/serving_models", "user_movie_model"))
+        
+        embeddings_base_path = os.environ.get("EMBEDDINGS_DIR",
+            os.path.join(get_project_dir(), "src/test/resources/data/"))
+        self.movie_emb = os.path.join(embeddings_base_path,
+            "movie_emb_inp/*tfrecord*.gz")
+        self.user_emb = os.path.join(embeddings_base_path,
+            "user_emb_inp/*tfrecord*.gz")
+        
+        self.recommendations_output_dir_path = os.environ.get("OUT_DIR", get_bin_dir())
         
         self.cold_start_path = os.path.join(get_project_dir(), "src/test/resources/data/cold_start_movies.txt")
-        
-        self.movie_emb = os.path.join(get_project_dir(),
-            "src/test/resources/data/movie_emb_inp/*tfrecord*.gz")
-        self.user_emb = os.path.join(get_project_dir(),
-            "src/test/resources/data/user_emb_inp/*tfrecord*.gz")
         
         self.users_path = os.path.join(get_project_dir(),
             "src/test/resources/data/users/users.parquet")
@@ -35,6 +47,9 @@ class TestRetrieval(unittest.TestCase):
             os.path.join(get_project_dir(),
                 "src/test/resources/data/ratings_val.array_record")
             ]
+        self.test_path = os.path.join(get_project_dir(),
+            "src/test/resources/data/ratings_test.array_record")
+        
         self.max_k = 10
         self.MOVIE_OFFSET = 6040 + 1
         
@@ -122,26 +137,30 @@ class TestRetrieval(unittest.TestCase):
         writes those recommednations and timestamps to 2 array_record files  and to 2 parquet files
         """
         num_movies = 3883
+        n_users = 6040
         rr = self._construct_Retrieval_using_train_val(max_k=num_movies)
         self.assertTrue(rr.max_hist > 200)
         
-        # first timestamp from test is 978133414
-        ts = 978133414
-        n_users = len(rr.user_data.gender)
+        #user_ids and timestamps for all ratings.  caveat is that users and movies with less than 30 ratings have been removed
+        user_ids, first_timestamps, first_timestamp_in_test = self.get_user_and_first_timestamps()
+        
+        full_user_ids = [[i] for i in range(1, n_users + 1)]
+        full_timestamps = [[first_timestamp_in_test] for i in range(1, n_users + 1)]
+        for user_id, timestamp in zip(user_ids.tolist(), first_timestamps.tolist()):
+            idx = user_id - 1
+            full_timestamps[idx] = [timestamp]
+        
         user_inp_dict = {
-            'user_id': tf.constant([[i] for i in range(1, n_users + 1)],
-                dtype=tf.int64),
+            'user_id': tf.constant(full_user_ids,  dtype=tf.int64),
             'gender': rr.user_data.gender[:, tf.newaxis],
             'age': rr.user_data.age[:, tf.newaxis],
             'occupation': rr.user_data.occupation[:, tf.newaxis],
-            'timestamp': tf.constant([[ts] for _ in range(n_users)],
-                dtype=tf.int64),
+            'timestamp': tf.constant(full_timestamps, dtype=tf.int64),
         }
         top_k = num_movies
         
         # (1)  np.ndarray:
-        recommended_movies = rr.get_movies_given_users(user_inp_dict,
-            top_k=top_k, rm_hist=False)
+        recommended_movies = rr.get_movies_given_users(user_inp_dict, top_k=top_k, rm_hist=False)
         self.assertTrue(recommended_movies.shape == (n_users, top_k))
         
         ts_2050 = 2524608000
@@ -166,10 +185,10 @@ class TestRetrieval(unittest.TestCase):
         
         # write the full recommenations w/o removal to array_record and assert can read it
         # write to array_records
-        outfile = os.path.join(get_bin_dir(), "recommended_movies.array_record")
-        outfile2 = os.path.join(get_bin_dir(), "recommended_movies_timestamps.array_record")
-        pa_outfile = os.path.join(get_bin_dir(), "recommended_movies.parquet")
-        pa_outfile2 = os.path.join(get_bin_dir(), "recommended_movies_timestamps.parquet")
+        outfile = os.path.join(self.recommendations_output_dir_path, "recommended_movies.array_record")
+        outfile2 = os.path.join(self.recommendations_output_dir_path, "recommended_movies_timestamps.array_record")
+        pa_outfile = os.path.join(self.recommendations_output_dir_path, "recommended_movies.parquet")
+        pa_outfile2 = os.path.join(self.recommendations_output_dir_path, "recommended_movies_timestamps.parquet")
         writer = None
         writer2 = None
         pa_movie_writer = None
@@ -317,3 +336,20 @@ class TestRetrieval(unittest.TestCase):
                 if reader is not None:
                     reader.close()
         return output
+    
+    def get_user_and_first_timestamps(self) -> Tuple[np.ndarray, np.ndarray, int]:
+        paths = self.user_movie_hist_path_patterns.copy()
+        paths.append(self.test_path)
+        dfs = []
+        for path in paths:
+            dfs.append(self._read_ratings_array_record(path, batch_size=2048))
+        df = pl.concat(dfs)
+        user_ids, first_timestamps = get_user_and_first_timestamp_from_ratings(df)
+        
+        df = self._read_ratings_array_record(self.test_path, batch_size=2048)
+        first_timestamp_in_test = df.select(pl.col("timestamp").min()).item()
+        
+        return user_ids, first_timestamps, first_timestamp_in_test
+        
+#if __name__ == '__main__':
+#    unittest.main()

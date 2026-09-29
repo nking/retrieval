@@ -41,7 +41,7 @@ class TestAnalysis(unittest.TestCase):
         cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, "user_movie_model")
         
         #temporary change to check latest model
-        cls.saved_models_dir = os.path.join(get_project_dir(), "../TMP8/bin/rs_pipeline/Pusher/pushed_model")
+        cls.saved_models_dir = os.path.join(get_project_dir(), "../TMP10/bin/rs_pipeline/Pusher/pushed_model")
         cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, "21")
         #self.assertTrue(os.path.exists(cls.user_movie_models_dir))
         
@@ -117,13 +117,19 @@ class TestAnalysis(unittest.TestCase):
             top_k=TestAnalysis.default_top_k)
         
         cls.summary_output_dir = os.path.join(get_bin_dir(), "post_training_analysis")
+        shutil.rmtree(cls.summary_output_dir, ignore_errors=True)
         cls.summary_output_conclusions_dict = dict()
+        cls.summary_output_metrics_dict = dict()
     
     @classmethod
     def tearDownClass(cls):
-        output_summary = os.path.join(cls.summary_output_dir, "summary.json")
-        with open(output_summary, "w") as f:
+        out_file_path = os.path.join(cls.summary_output_dir, "summary_conclusions.json")
+        with open(out_file_path, "w") as f:
             json.dump(cls.summary_output_conclusions_dict, f, indent=4)
+        
+        out_file_path = os.path.join(cls.summary_output_dir,"summary_metricss.json")
+        with open(out_file_path, "w") as f:
+            json.dump(cls.summary_output_metrics_dict, f, indent=4)
 
     def test_data_shifts(self):
         output_file_path = os.path.join(TestAnalysis.summary_output_dir, "data_shifts.json")
@@ -320,7 +326,7 @@ class TestAnalysis(unittest.TestCase):
                 f"Label shift between Train and Test splits."
             )
             label_shift = True
-        if not label_shift and (p_x_train_to_val, p_x_train_to_test) < 0.015 and max(p_y_x_train_to_val, p_y_x_train_to_test) >= 0.015:
+        if not label_shift and max(p_x_train_to_val, p_x_train_to_test) < 0.015 and max(p_y_x_train_to_val, p_y_x_train_to_test) >= 0.015:
             conclusions.append(
                 f"Concept shift between Train and Test splits."
             )
@@ -336,6 +342,9 @@ class TestAnalysis(unittest.TestCase):
         #res = self.convert_to_native_types(res)
         
         print(f"Tier EMD Analysis:\n{json.dumps(res, indent=4)}")
+        
+        TestAnalysis.summary_output_metrics_dict.update(**res)
+        del TestAnalysis.summary_output_metrics_dict['automated_conclusions']
         
         with open(output_file_path, "w") as f:
             json.dump(res, f, indent=4)
@@ -645,6 +654,10 @@ class TestAnalysis(unittest.TestCase):
             
             agg_res["automated_conclusions"] = conclusions
             
+            TestAnalysis.summary_output_metrics_dict.update(**agg_res)
+            del TestAnalysis.summary_output_metrics_dict[
+                'automated_conclusions']
+            
             TestAnalysis.summary_output_conclusions_dict[
                 f'stratified_metrics@{top_k}'] = conclusions
         
@@ -907,7 +920,14 @@ class TestAnalysis(unittest.TestCase):
                 TestAnalysis.summary_output_conclusions_dict[f'coverage@{top_k}'] = conclusions
                 
                 agg_res[f"eval_k_{top_k}"] = res
-                
+        
+        TestAnalysis.summary_output_metrics_dict.update(**agg_res)
+        for top_k in [TestAnalysis.default_top_k, 20]:
+            try:
+                del TestAnalysis.summary_output_metrics_dict[f"eval_k_{top_k}"]['automated_conclusions']
+            except Exception:
+                pass
+        
         print(f'\n', json.dumps(agg_res, indent=4))
         with open(output_file_path, "w") as f:
             json.dump(agg_res, f, indent=4)
@@ -949,16 +969,19 @@ class TestAnalysis(unittest.TestCase):
             
             tier_ground_truth_df = pos_test_df.filter(pl.col(stratification_key)==tier)
             tier_history_df = history_df.filter(pl.col(stratification_key)==tier)
-            
+            tag = f"{stratification_key}_{tier}"
             res = self.evaluate_popularity_bias(
                 neighbors=neighbors,  # shape: (n_users, top_k)
                 ground_truth_df = tier_ground_truth_df,  # Test set (positives only)
                 train_history_df = tier_history_df,  # Train set (positives only)
                 top_k = TestAnalysis.default_top_k,
-                tag=f"{stratification_key}_{tier}"
+                tag=tag
             )
         
             agg_res = agg_res | res
+            
+            TestAnalysis.summary_output_metrics_dict.update(**agg_res)
+            del  TestAnalysis.summary_output_metrics_dict[f'{tag}_automated_conclusions']
             
         print("popularity bias\n", json.dumps(agg_res, indent=4))
         
@@ -1066,6 +1089,9 @@ class TestAnalysis(unittest.TestCase):
         agg_res = self.convert_to_native_types(agg_res)
         print(f"Embedding Hubness:\n", json.dumps(agg_res, indent=4))
         
+        TestAnalysis.summary_output_metrics_dict.update(**agg_res)
+        del TestAnalysis.summary_output_metrics_dict["automated_conclusions"]
+        
         with open(output_file_path, "w") as f:
             json.dump(agg_res, f, indent=4)
     
@@ -1152,7 +1178,7 @@ class TestAnalysis(unittest.TestCase):
                 neighbors, num_catalog_movies
             )
             res = self.analyze_inter_user_diversity(mean_jaccard,
-                num_catalog_movies, TestAnalysis.default_top_k, f"tier_{tier}",
+                num_catalog_movies, TestAnalysis.default_top_k, f"user_tier_{tier}",
                 baseline_jaccard=None
             )
             
@@ -1179,7 +1205,7 @@ class TestAnalysis(unittest.TestCase):
         )
         
         res = self.analyze_inter_user_diversity(mean_jaccard,
-            num_catalog_movies, TestAnalysis.default_top_k, "all_users_but_catalog_has_cold_start_movies",
+            num_catalog_movies, TestAnalysis.default_top_k, "all_users_and_catalog_has_cold_start_movies",
             baseline_jaccard=None
         )
         
@@ -1210,6 +1236,9 @@ class TestAnalysis(unittest.TestCase):
             neighbors = tf.convert_to_tensor(neighbors, dtype=tf.int32)
         
         res = self.calculate_batched_intra_list_diversity(neighbors, TestAnalysis.movie_catalog_embeddings)
+        
+        TestAnalysis.summary_output_metrics_dict.update(**res)
+        del TestAnalysis.summary_output_metrics_dict["automated_conclusions"]
         
         print(f"Average Intra-List Diversity @ {TestAnalysis.default_top_k}\n: {json.dumps(res, indent=4)}")
         
@@ -1315,9 +1344,11 @@ class TestAnalysis(unittest.TestCase):
         res = self.compare_retrieval_runs(orig_results, new_results, top_k, TestAnalysis.model_dict["n_movies"], "test set", "cold-start set")
         print("comparisons:\n", json.dumps(res, indent=4))
         
+        TestAnalysis.summary_output_metrics_dict.update(**res)
+        del TestAnalysis.summary_output_metrics_dict["automated_conclusions"]
+        
         with open(output_file_path, "w") as f:
             json.dump(res, f, indent=4)
-        
         
     def convert_to_native_types(self, obj):
         """Recursively converts NumPy types to native Python types for JSON serialization."""
@@ -1451,7 +1482,7 @@ class TestAnalysis(unittest.TestCase):
                 "std_delta_log_pop": round(std_delta_pop, 4),
                 "amplification_ratio": round(amplification_ratio, 4)
             },
-            f"{tag}_analysis": conclusions
+            f"{tag}_automated_conclusions": conclusions
         }
     
     def normalize(self, a: list):
@@ -1598,6 +1629,8 @@ class TestAnalysis(unittest.TestCase):
                 )
         
         TestAnalysis.summary_output_conclusions_dict[f"{dict_tag}_inter_user_diversity_conclusions"] = conclusions
+
+        TestAnalysis.summary_output_metrics_dict[f"{dict_tag}_inter_user_diversity_metrics"] = metrics.copy()
         
         return {
             f"{dict_tag}_inter_user_diversity_metrics": metrics,
@@ -1790,7 +1823,7 @@ class TestAnalysis(unittest.TestCase):
             "model_ild": round(model_ild, 6),
             "random_ild": round(random_ild, 6),
             "diversity_ratio": round(diversity_ratio, 4),
-            "analysis": conclusions
+            "automated_conclusions": conclusions
         }
     
     def get_cold_start_movies(self, pos_test_df: pl.DataFrame) -> Tuple[tf.Tensor, tf.Tensor]:
@@ -1951,7 +1984,7 @@ class TestAnalysis(unittest.TestCase):
         TestAnalysis.summary_output_conclusions_dict['cold_start_embeddings'] = conclusions
         
         return {
-            "expected_random_recall": round(expected_random_recall, 6),
+            f"expected_random_recall@{top_k}": round(expected_random_recall, 6),
             "comparison_metrics": diffs,
             "automated_conclusions": conclusions
         }

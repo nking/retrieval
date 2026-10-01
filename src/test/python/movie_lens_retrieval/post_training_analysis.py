@@ -118,6 +118,7 @@ class TestAnalysis(unittest.TestCase):
         
         cls.summary_output_dir = os.path.join(get_bin_dir(), "post_training_analysis")
         shutil.rmtree(cls.summary_output_dir, ignore_errors=True)
+        os.makedirs(cls.summary_output_dir, exist_ok=True)
         cls.summary_output_conclusions_dict = dict()
         cls.summary_output_metrics_dict = dict()
     
@@ -127,7 +128,7 @@ class TestAnalysis(unittest.TestCase):
         with open(out_file_path, "w") as f:
             json.dump(cls.summary_output_conclusions_dict, f, indent=4)
         
-        out_file_path = os.path.join(cls.summary_output_dir,"summary_metricss.json")
+        out_file_path = os.path.join(cls.summary_output_dir,"summary_metrics.json")
         with open(out_file_path, "w") as f:
             json.dump(cls.summary_output_metrics_dict, f, indent=4)
 
@@ -437,8 +438,7 @@ class TestAnalysis(unittest.TestCase):
                     "ndcg_at_k"),
                 
                 # Expected Random Baselines
-                pl.lit(expected_random_recall).alias(
-                    "expected_random_recall_at_k"),
+                pl.lit(expected_random_recall).alias("expected_random_recall_at_k"),
                 (pl.col("total_positives") / float(catalog_size)).alias(
                     "expected_random_precision_at_k"),
                 (pl.col(
@@ -447,17 +447,21 @@ class TestAnalysis(unittest.TestCase):
             )
             
             res = {
-                f"mean_recall_at_{top_k}": metrics_df.select(
+                f"recall_at_{top_k}_mean": metrics_df.select(
                     pl.col("recall_at_k")).mean().item(),
-                f"mean_precision_at_{top_k}": metrics_df.select(
+                f"recall_at_{top_k}_std": metrics_df.select(
+                    pl.col("recall_at_k")).std().item(),
+                f"precision_at_{top_k}_mean": metrics_df.select(
                     pl.col("precision_at_k")).mean().item(),
-                f"mean_ndcg_at_{top_k}": metrics_df.select(
+                f"precision_at_{top_k}_std": metrics_df.select(
+                    pl.col("precision_at_k")).std().item(),
+                f"ndcg_at_{top_k}_mean": metrics_df.select(
                     pl.col("ndcg_at_k")).mean().item(),
-                f"mean_random_recall_at_{top_k}": metrics_df.select(
+                f"recall_at_{top_k}_mean_random": metrics_df.select(
                     pl.col("expected_random_recall_at_k")).mean().item(),
-                f"mean_random_precision_at_{top_k}": metrics_df.select(
+                f"precision_at_{top_k}_mean_random": metrics_df.select(
                     pl.col("expected_random_precision_at_k")).mean().item(),
-                f"mean_random_ndcg_at_{top_k}": metrics_df.select(
+                f"ndcg_at_{top_k}_mean_random": metrics_df.select(
                     pl.col("expected_random_ndcg_at_k")).mean().item()
             }
             
@@ -466,12 +470,18 @@ class TestAnalysis(unittest.TestCase):
             for user_tier in (0, 1, 2):
                 df = metrics_df.filter(pl.col("user_tier") == user_tier)
                 res = {
-                    f"user_tier_{user_tier}_mean_recall_at_{top_k}": df.select(
+                    f"recall_at_{top_k}_mean_user_tier_{user_tier}": df.select(
                         pl.col("recall_at_k")).mean().item(),
-                    f"user_tier_{user_tier}_mean_precision_at_{top_k}": df.select(
+                    f"recall_at_{top_k}_std_user_tier_{user_tier}": df.select(
+                        pl.col("recall_at_k")).std().item(),
+                    f"precision_at_{top_k}_mean_user_tier_{user_tier}": df.select(
                         pl.col("precision_at_k")).mean().item(),
-                    f"user_tier_{user_tier}_mean_ndcg_at_{top_k}": df.select(
+                    f"precision_at_{top_k}_std_user_tier_{user_tier}": df.select(
+                        pl.col("precision_at_k")).std().item(),
+                    f"ndcg_at_{top_k}_mean_user_tier_{user_tier}": df.select(
                         pl.col("ndcg_at_k")).mean().item(),
+                    f"ndcg_at_{top_k}_std_user_tier_{user_tier}": df.select(
+                        pl.col("ndcg_at_k")).std().item(),
                 }
                 agg_res = agg_res | res
             
@@ -490,8 +500,7 @@ class TestAnalysis(unittest.TestCase):
                                 pl.col("movie_tier") == tier)) + 1.0).log(
                     2)).sum().alias(f"dcg_tier_{tier}") for tier in (0, 1, 2)]
             )
-            metrics_df = metrics_df.join(user_gt_counts, on="user_id",
-                how="inner")
+            metrics_df = metrics_df.join(user_gt_counts, on="user_id", how="inner")
             
             metrics_df = metrics_df.with_columns(
                 pl.int_ranges(1, pl.min_horizontal(pl.col("total_positives"),
@@ -558,27 +567,34 @@ class TestAnalysis(unittest.TestCase):
             )
             
             res = {
-                f"_mean_recall_at_{top_k}": metrics_df.select(
+                f"recall_at_{top_k}_mean": metrics_df.select(
                     pl.col("recall_global")).mean().item(),
-                f"_mean_precision_at_{top_k}": metrics_df.select(
+                f"recall_at_{top_k}_std": metrics_df.select(
+                    pl.col("recall_global")).std().item(),
+                f"precision_at_{top_k}_mean": metrics_df.select(
                     pl.col("precision_global")).mean().item(),
-                f"_mean_ndcg_at_{top_k}": metrics_df.select(
+                f"precision_at_{top_k}_std": metrics_df.select(
+                    pl.col("precision_global")).std().item(),
+                f"ndcg_at_{top_k}_mean": metrics_df.select(
                     pl.col("ndcg_global")).mean().item(),
-                f"_mean_random_recall_at_{top_k}": metrics_df.select(
+                f"ndcg_at_{top_k}_std": metrics_df.select(
+                    pl.col("ndcg_global")).std().item(),
+                f"recall_at_{top_k}_mean_random": metrics_df.select(
                     pl.col("expected_random_recall")).mean().item(),
-                f"_mean_random_precision_at_{top_k}": metrics_df.select(
+                f"precision_at_{top_k}_mean_random": metrics_df.select(
                     pl.col("expected_random_precision")).mean().item(),
-                f"_mean_random_ndcg_at_{top_k}": metrics_df.select(
+                f"ndcg_at_{top_k}_mean_random": metrics_df.select(
                     pl.col("expected_random_ndcg")).mean().item(),
+                f"ndcg_at_{top_k}_std_random": metrics_df.select(
+                    pl.col("expected_random_ndcg")).std().item(),
                 
-                **{f"recall_movie_tier_{tier}_at_{top_k}": metrics_df.select(
+                **{f"recall_at_{top_k}_mean_movie_tier_{tier}": metrics_df.select(
                     pl.col(f"recall_tier_{tier}")).mean().item() for tier in
                     (0, 1, 2)},
-                **{
-                    f"precision_movie_tier_{tier}_at_{top_k}": metrics_df.select(
+                **{f"precision_at_{top_k}_mean_movie_tier_{tier}": metrics_df.select(
                         pl.col(f"precision_tier_{tier}")).mean().item() for
                     tier in (0, 1, 2)},
-                **{f"ndcg_movie_tier_{tier}_at_{top_k}": metrics_df.select(
+                **{f"ndcg_at_{top_k}_mean_movie_tier_{tier}": metrics_df.select(
                     pl.col(f"ndcg_tier_{tier}")).mean().item() for tier in
                     (0, 1, 2)}
             }
@@ -586,10 +602,10 @@ class TestAnalysis(unittest.TestCase):
             
             conclusions = []
             
-            global_recall = agg_res[f"mean_recall_at_{top_k}"]
-            random_recall = agg_res[f"mean_random_recall_at_{top_k}"]
-            global_precision = agg_res[f"mean_precision_at_{top_k}"]
-            random_precision = agg_res[f"mean_random_precision_at_{top_k}"]
+            global_recall = agg_res[f"recall_at_{top_k}_mean"]
+            random_recall = agg_res[f"recall_at_{top_k}_mean_random"]
+            global_precision = agg_res[f"precision_at_{top_k}_mean"]
+            random_precision = agg_res[f"precision_at_{top_k}_mean_random"]
             
             # Baseline Performance Lift
             if global_recall > random_recall * 3:
@@ -614,8 +630,8 @@ class TestAnalysis(unittest.TestCase):
                     "PRECISION FAILURE: The model retrieves slates with the same or worse precision than a completely random draw.")
             
             # Cohort History Utilization (Recall Trend)
-            recall_t0 = agg_res[f"user_tier_0_mean_recall_at_{top_k}"]
-            recall_t2 = agg_res[f"user_tier_2_mean_recall_at_{top_k}"]
+            recall_t0 = agg_res[f"recall_at_{top_k}_mean_user_tier_0"]
+            recall_t2 = agg_res[f"recall_at_{top_k}_mean_user_tier_2"]
             
             if recall_t2 > recall_t0 * 1.5:
                 conclusions.append(
@@ -628,8 +644,8 @@ class TestAnalysis(unittest.TestCase):
                     f"HISTORY NEGLECT WARNING: Power users perform worse or equal to light users, indicating the model struggles to parse dense interaction histories.")
             
             # NDCG (Ranking Quality)
-            ndcg_t0 = agg_res[f"user_tier_0_mean_ndcg_at_{top_k}"]
-            ndcg_t2 = agg_res[f"user_tier_2_mean_ndcg_at_{top_k}"]
+            ndcg_t0 = agg_res[f"ndcg_at_{top_k}_mean_user_tier_0"]
+            ndcg_t2 = agg_res[f"ndcg_at_{top_k}_mean_user_tier_2"]
             
             if ndcg_t2 > ndcg_t0:
                 conclusions.append(
@@ -639,8 +655,8 @@ class TestAnalysis(unittest.TestCase):
                     "POOR RANKING STRATIFICATION: NDCG does not improve for power users, suggesting the model retrieves relevant items but places them randomly within the top K.")
             
             # Movie Tier Performance (Popularity Bias & Tail Retrieval)
-            ndcg_mt0 = agg_res.get(f"ndcg_movie_tier_0_at_{top_k}", 0.0)
-            ndcg_mt2 = agg_res.get(f"ndcg_movie_tier_2_at_{top_k}", 0.0)
+            ndcg_mt0 = agg_res.get(f"ndcg_at_{top_k}_mean_movie_tier_0", 0.0)
+            ndcg_mt2 = agg_res.get(f"ndcg_at_{top_k}_mean_movie_tier_2", 0.0)
             
             if ndcg_mt2 > ndcg_mt0 * 1.5:
                 conclusions.append(
@@ -655,11 +671,9 @@ class TestAnalysis(unittest.TestCase):
             agg_res["automated_conclusions"] = conclusions
             
             TestAnalysis.summary_output_metrics_dict.update(**agg_res)
-            del TestAnalysis.summary_output_metrics_dict[
-                'automated_conclusions']
+            del TestAnalysis.summary_output_metrics_dict['automated_conclusions']
             
-            TestAnalysis.summary_output_conclusions_dict[
-                f'stratified_metrics@{top_k}'] = conclusions
+            TestAnalysis.summary_output_conclusions_dict[f'stratified_metrics@{top_k}'] = conclusions
         
         print(f'metrics\n={json.dumps(agg_res, indent=4)}')
         
@@ -705,21 +719,21 @@ class TestAnalysis(unittest.TestCase):
             
             count = retrieval_df["movie_id"].n_unique()
             cat_count = TestAnalysis.model_dict['n_movies']
-            res["full_coverage"] = float(count)/float(cat_count)
+            res[f"coverage_at_{top_k}_full"] = float(count)/float(cat_count)
             
             # count by movie_tier
             retrieval_df = retrieval_df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")  #adds column "movie_tier"
             for movie_tier in range(0, 3):
                 count = retrieval_df.filter(pl.col("movie_tier") == movie_tier)["movie_id"].n_unique()
                 cat_count = TestAnalysis.movie_tiers_df.filter(pl.col("movie_tier") == movie_tier)["movie_id"].count()
-                res[f"movie_tier_{movie_tier}_coverage"] = float(count) / float(cat_count)
+                res[f"coverage_at_{top_k}_movie_tier_{movie_tier}"] = float(count) / float(cat_count)
             
             #count by user_tier
             retrieval_df = retrieval_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left") #adds column "user_tier"
             cat_count = TestAnalysis.model_dict['n_movies']
             for user_tier in range(0, 3):
                 count = retrieval_df.filter(pl.col("user_tier")==user_tier)["movie_id"].n_unique()
-                res[f"user_tier_{user_tier}_coverage"] = float(count) / (float(cat_count))
+                res[f"coverage_at_{top_k}_user_tier_{user_tier}"] = float(count) / (float(cat_count))
                 
             #count by user_tier and movie_tier
             for user_tier in range(0, 3):
@@ -728,11 +742,11 @@ class TestAnalysis(unittest.TestCase):
                     df2 = df.filter(pl.col("movie_tier") == movie_tier)
                     count = df2["movie_id"].n_unique()
                     cat_count = TestAnalysis.movie_tiers_df.filter(pl.col("movie_tier") == movie_tier)["movie_id"].count()
-                    res[f"user_tier_{user_tier}_movie_tier_{movie_tier}_coverage"] = float(count) / float(cat_count)
+                    res[f"coverage_at_{top_k}_user_tier_{user_tier}_movie_tier_{movie_tier}"] = float(count) / float(cat_count)
                     
-            agg_res[f"coverage_k_{top_k}"] = res
+            agg_res = agg_res | res
             
-            if top_k != TestAnalysis.default_top_k:
+            if True: #top_k != TestAnalysis.default_top_k:
                 #calc Gini coeff
                 res = dict()
                 # ------------------------------------------------------------------
@@ -793,8 +807,7 @@ class TestAnalysis(unittest.TestCase):
                         lorenz_df.with_columns(
                             (pl.col("cum_items_pct") * 100).ceil().cast(
                                 pl.Int32).alias("percentile"))
-                        .group_by("percentile").agg(
-                            pl.col("cum_recs_pct").max())
+                        .group_by("percentile").agg(pl.col("cum_recs_pct").max())
                         .sort("percentile")["cum_recs_pct"].to_list()
                     )
                     
@@ -815,7 +828,7 @@ class TestAnalysis(unittest.TestCase):
                                  (n_tier * tier_recs)) - (
                                             (n_tier + 1.0) / n_tier)
                             ).item()
-                        res[f"movie_tier_{movie_tier}_gini"] = float(tier_gini)
+                        res[f"gini_at_{top_k}_movie_tier_{movie_tier}"] = float(tier_gini)
                     
                     # --- Gini by User Tier ---
                     for user_tier in range(0, 3):
@@ -848,7 +861,7 @@ class TestAnalysis(unittest.TestCase):
                                  (n_catalog * u_tier_recs)) - (
                                             (n_catalog + 1.0) / n_catalog)
                             ).item()
-                        res[f"user_tier_{user_tier}_gini"] = float(u_tier_gini)
+                        res[f"gini_at_{top_k}_user_tier_{user_tier}"] = float(u_tier_gini)
                 
                 else:
                     full_gini = 0.0
@@ -856,10 +869,10 @@ class TestAnalysis(unittest.TestCase):
                     top_10_share = 0.0
                     lorenz_curve_array = []
                 
-                res["full_gini"] = float(full_gini)
-                res["lorenz_bottom_80_share"] = float(bottom_80_share)
-                res["lorenz_top_10_share"] = float(top_10_share)
-                res["lorenz_curve_array"] = lorenz_curve_array  # List of 100 floats for JSON export
+                res[f"gini_at_{top_k}_full"] = float(full_gini)
+                res[f"lorenz_at_{top_k}_bottom_80_share"] = float(bottom_80_share)
+                res[f"lorenz_at_{top_k}_top_10_share"] = float(top_10_share)
+                res[f"lorenz_at_{top_k}_curve_array"] = lorenz_curve_array  # List of 100 floats for JSON export
                 
                 if lorenz_curve_array:
                     output_lorenz_file_path = os.path.join(out_dir, f"lorenz_curve_k_{top_k}.png")
@@ -874,52 +887,52 @@ class TestAnalysis(unittest.TestCase):
                     # Insight 1: Overall Popularity Bias (Full Gini)
                     if full_gini > 0.90:
                         conclusions.append(
-                            f"SEVERE POPULARITY BIAS: Gini is {full_gini:.2f}. The model is acting as a popularity echo chamber, collapsing onto blockbuster items.")
+                            f"SEVERE POPULARITY BIAS at_{top_k}: Gini is {full_gini:.2f}. The model is acting as a popularity echo chamber, collapsing onto blockbuster items.")
                     elif full_gini < 0.45:
                         conclusions.append(
-                            f"SUSPICIOUSLY UNIFORM: Gini is {full_gini:.2f}. The model may be overly random or popularity suppression (Log-Q/Temperature) is too aggressive.")
+                            f"SUSPICIOUSLY UNIFORM at_{top_k}: Gini is {full_gini:.2f}. The model may be overly random or popularity suppression (Log-Q/Temperature) is too aggressive.")
                     else:
                         conclusions.append(
-                            f"HEALTHY BIAS: Gini is {full_gini:.2f}. The model successfully balances mainstream relevance with catalog exploration.")
+                            f"HEALTHY BIAS at_{top_k}: Gini is {full_gini:.2f}. The model successfully balances mainstream relevance with catalog exploration.")
                     
                     # Insight 2: Long-Tail Health (Bottom 80% Share)
                     if bottom_80_share < 0.05:
                         conclusions.append(
-                            f"DEAD TAIL: The bottom 80% of the catalog receives only {bottom_80_share:.1%} of recommendations. Niche items are effectively invisible.")
+                            f"DEAD TAIL at_{top_k}: The bottom 80% of the catalog receives only {bottom_80_share:.1%} of recommendations. Niche items are effectively invisible.")
                     elif bottom_80_share > 0.15:
                         conclusions.append(
-                            f"STRONG TAIL: The bottom 80% captures {bottom_80_share:.1%} of traffic, indicating excellent long-tail surfacing capability.")
+                            f"STRONG TAIL at_{top_k}: The bottom 80% captures {bottom_80_share:.1%} of traffic, indicating excellent long-tail surfacing capability.")
                     else:
                         conclusions.append(
-                            f"MODERATE TAIL: The bottom 80% captures {bottom_80_share:.1%} of traffic.")
+                            f"MODERATE TAIL at_{top_k}: The bottom 80% captures {bottom_80_share:.1%} of traffic.")
                     
                     # Insight 3: Head Concentration (Top 10% Share)
                     if top_10_share > 0.75:
                         conclusions.append(
-                            f"HEAD HEAVY: The top 10% of items consume {top_10_share:.1%} of all recommendation slots.")
+                            f"HEAD HEAVY at_{top_k}: The top 10% of items consume {top_10_share:.1%} of all recommendation slots.")
                     else:
                         conclusions.append(
-                            f"DIVERSE HEAD: The top 10% consume {top_10_share:.1%} of slots, leaving plenty of room for the torso/tail.")
+                            f"DIVERSE HEADat_{top_k}: The top 10% consume {top_10_share:.1%} of slots, leaving plenty of room for the torso/tail.")
                     
                     # Insight 4: User Cohort Behavior
-                    gini_power = res.get("user_tier_2_gini", 1.0)
-                    gini_light = res.get("user_tier_0_gini", 1.0)
+                    gini_power = res.get(f"gini_at_{top_k}_user_tier_2", 1.0)
+                    gini_light = res.get(f"ginie_at_{top_k}_user_tier_0", 1.0)
                     
                     if gini_power < gini_light - 0.02:  # 0.02 buffer for noise
                         conclusions.append(
-                            "USER PERSONALIZATION: Power users exhibit lower Gini (more diverse slates) than light users, successfully leveraging rich interaction histories.")
+                            "USER PERSONALIZATION at_{top_k}: Power users exhibit lower Gini (more diverse slates) than light users, successfully leveraging rich interaction histories.")
                     elif gini_power > gini_light + 0.02:
                         conclusions.append(
-                            "WARNING (COHORT COLLAPSE): Power users have higher concentration (Gini) than light users. The model may be pulling rich histories into dense popularity traps.")
+                            "WARNING (COHORT COLLAPSE) at_{top_k}: Power users have higher concentration (Gini) than light users. The model may be pulling rich histories into dense popularity traps.")
                     else:
                         conclusions.append(
-                            "UNIFORM COHORTS: Light and Power users experience roughly the same level of catalog concentration.")
+                            "UNIFORM COHORTS at_{top_k}: Light and Power users experience roughly the same level of catalog concentration.")
                 
                 res["automated_conclusions"] = conclusions
                 
                 TestAnalysis.summary_output_conclusions_dict[f'coverage@{top_k}'] = conclusions
                 
-                agg_res[f"eval_k_{top_k}"] = res
+                agg_res = agg_res | res
         
         TestAnalysis.summary_output_metrics_dict.update(**agg_res)
         for top_k in [TestAnalysis.default_top_k, 20]:
@@ -1011,7 +1024,7 @@ class TestAnalysis(unittest.TestCase):
         
         global_item_uniformity = calc_uniformity(TestAnalysis.movie_catalog_embeddings.numpy())
         
-        agg_res[f"Global Item Uniformity"] = global_item_uniformity
+        agg_res[f"uniformity_global_item"] = global_item_uniformity
         
         #this is the test dataset of positive ratings
         pos_test_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
@@ -1043,11 +1056,9 @@ class TestAnalysis(unittest.TestCase):
             pos_dot_products = np.sum(u_np * m_np, axis=1)
             tier_alignment = np.mean(2.0 - 2.0 * pos_dot_products)
             
-            agg_res[f"user_tier_{user_tier}"] = {
-                "alignment": float(tier_alignment),
-                "user_uniformity": float(tier_user_uniformity)
-            }
-            
+            agg_res[f'uniformity_user_tier_{user_tier}'] = float(tier_user_uniformity)
+            agg_res[f'alignment_user_tier_{user_tier}'] = float(tier_alignment)
+
         # ------------------------------------------------------------------
         # RULE-BASED CONCLUSIONS
         # ------------------------------------------------------------------
@@ -1064,8 +1075,8 @@ class TestAnalysis(unittest.TestCase):
             conclusions.append(f"MODERATE ITEM UNIFORMITY: Items are adequately distributed ({global_item_uniformity:.2f}).")
     
         # Rule 2: User Cohort Collapse (Are power users clumping?)
-        u_uni_light = agg_res["user_tier_0"]["user_uniformity"]
-        u_uni_power = agg_res["user_tier_2"]["user_uniformity"]
+        u_uni_light = agg_res["uniformity_user_tier_0"]
+        u_uni_power = agg_res["uniformity_user_tier_2"]
         
         if u_uni_power > u_uni_light + 0.5:
             conclusions.append(f"POWER USER COLLAPSE: Power users (Tier 2 uniformity: {u_uni_power:.2f}) are significantly more clumped than Light users (Tier 0 uniformity: {u_uni_light:.2f}). Their rich histories are collapsing into dense 'average' vectors.")
@@ -1074,7 +1085,7 @@ class TestAnalysis(unittest.TestCase):
     
         # Rule 3: Alignment Quality (Are users near their ground truth items?)
         # Distance of 2.0 is perfectly orthogonal (random). < 1.0 is good alignment.
-        avg_alignment = np.mean([agg_res[f"user_tier_{i}"]["alignment"] for i in range(3)])
+        avg_alignment = np.mean([agg_res[f"alignment_user_tier_{i}"] for i in range(3)])
         if avg_alignment > 1.5:
             conclusions.append(f"POOR ALIGNMENT: Average positive pair distance is {avg_alignment:.2f} (Max is 4.0). User embeddings are struggling to map closely to their interacted items.")
         elif avg_alignment < 0.5:
@@ -1219,8 +1230,6 @@ class TestAnalysis(unittest.TestCase):
     def test_intra_list_diversity(self):
         
         output_file_path = os.path.join(TestAnalysis.summary_output_dir, "intralist_diversity.json")
-
-        agg_res = dict()
         
         pos_test_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
         first_interactions_df = pos_test_df.group_by("user_id").agg(pl.col("timestamp").min())
@@ -1335,13 +1344,13 @@ class TestAnalysis(unittest.TestCase):
         orig_neighbors, orig_distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
         new_neighbors, new_distances = new_indexer.search_batched(user_embeddings)
         
-        orig_results = self.evaluate_retrieval_with_tier_share(user_ids, orig_neighbors, TestAnalysis.MOVIE_OFFSET, candidate_pool_df, TestAnalysis.movie_tiers_df, top_k=top_k)
-        new_results = self.evaluate_retrieval_with_tier_share(user_ids, new_neighbors, TestAnalysis.MOVIE_OFFSET, candidate_pool_df, TestAnalysis.movie_tiers_df, top_k=top_k)
+        res_original = self.evaluate_retrieval_with_tier_share(user_ids, orig_neighbors, TestAnalysis.MOVIE_OFFSET, candidate_pool_df, top_k=top_k)
+        res_new = self.evaluate_retrieval_with_tier_share(user_ids, new_neighbors, TestAnalysis.MOVIE_OFFSET, candidate_pool_df, top_k=top_k)
 
-        print("results on test set:\n", json.dumps(orig_results, indent=4))
-        print("results on test set cold start:\n", json.dumps(new_results, indent=4))
+        print("results on test set:\n", json.dumps(res_original, indent=4))
+        print("results on test set cold start:\n", json.dumps(res_new, indent=4))
         
-        res = self.compare_retrieval_runs(orig_results, new_results, top_k, TestAnalysis.model_dict["n_movies"], "test set", "cold-start set")
+        res = self.compare_retrieval_runs(res_original, res_new, top_k, TestAnalysis.model_dict["n_movies"], "test set", "cold-start set")
         print("comparisons:\n", json.dumps(res, indent=4))
         
         TestAnalysis.summary_output_metrics_dict.update(**res)
@@ -1820,8 +1829,8 @@ class TestAnalysis(unittest.TestCase):
         TestAnalysis.summary_output_conclusions_dict["intra-list divserity"] = conclusions
         
         return {
-            "model_ild": round(model_ild, 6),
-            "random_ild": round(random_ild, 6),
+            "ild_movie": round(model_ild, 6),
+            "ild_random": round(random_ild, 6),
             "diversity_ratio": round(diversity_ratio, 4),
             "automated_conclusions": conclusions
         }
@@ -1863,12 +1872,12 @@ class TestAnalysis(unittest.TestCase):
             experiment: Dict[str, Any],
             top_k: int,
             num_catalog_movies: int,
-            baseline_name: str = "Standard Test",
-            exp_name: str = "Cold Start"
+            baseline_name: str = "test_retrieval",
+            exp_name: str = "cold_start_retrieval"
     ) -> Dict[str, Any]:
         
         metrics_to_compare = [
-            f"overall_recall@{top_k}",
+            f"recall@{top_k}_overall",
             f"recall_movie_tier0@{top_k}",
             f"recall_movie_tier1@{top_k}",
             f"recall_movie_tier2@{top_k}",
@@ -1910,8 +1919,8 @@ class TestAnalysis(unittest.TestCase):
         # --- Automated Conclusion Generator Rules ---
         conclusions = []
         
-        base_recall = baseline.get(f"overall_recall@{top_k}", 0.0)
-        exp_recall = experiment.get(f"overall_recall@{top_k}", 0.0)
+        base_recall = baseline.get(f"recall@{top_k}_overall", 0.0)
+        exp_recall = experiment.get(f"recall@{top_k}_overall", 0.0)
         
         # 1. Baseline Sanity Checks
         if base_recall <= random_threshold:
@@ -1925,6 +1934,7 @@ class TestAnalysis(unittest.TestCase):
                 f"Consider evaluating at a larger K (e.g., K=100 or K=200) to avoid candidate bottlenecking."
             )
         
+        drop_pct = None
         # 2. Experiment Random Check & Overall Drop
         if exp_recall > 0 and exp_recall <= random_threshold:
             conclusions.append(
@@ -1986,6 +1996,7 @@ class TestAnalysis(unittest.TestCase):
         return {
             f"expected_random_recall@{top_k}": round(expected_random_recall, 6),
             "comparison_metrics": diffs,
+            f"recall_cold_start_percnt_drop" : drop_pct, #can be None
             "automated_conclusions": conclusions
         }
     
@@ -1994,7 +2005,6 @@ class TestAnalysis(unittest.TestCase):
             neighbors: np.ndarray,  # shape: (325, top_k)
             movie_offset: int,  # TestAnalysis.MOVIE_OFFSET
             ground_truth_df: pl.DataFrame, # columns: user_id, movie_id, rating, timestamp, tier
-            movie_tiers_df: pl.DataFrame, # columns: movie_id, tier (for catalog-wide lookup)
             top_k: int = 20
     ) -> dict:
         
@@ -2063,7 +2073,7 @@ class TestAnalysis(unittest.TestCase):
         
         # Aggregate metrics
         results = {
-            f"overall_recall@{top_k}": float(
+            f"recall@{top_k}_overall": float(
                 np.mean(all_recalls)) if all_recalls else 0.0,
             f"recall_movie_tier0@{top_k}": float(np.mean(tier_recalls[0])) if
             tier_recalls[0] else 0.0,

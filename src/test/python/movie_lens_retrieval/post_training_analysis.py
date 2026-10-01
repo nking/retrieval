@@ -4,6 +4,23 @@ scripts to analysis the trained models from the recommender_systems project.
 some of the analysis is in rust in the ranker project directory inference_src and will be ported
 to python here to have it all in one place
 """
+
+'''
+example usage from CLI:
+
+export SAVED_MODEL_DIR="../TMP10/bin/rs_pipeline/Pusher/pushed_model"
+export MODEL_VERSION="21"
+export OUTPUT_BASE_DIR="../TMP10"
+python3 -m unittest src.test.python.movie_lens_retrieval.post_training_analysis.TestAnalysis
+
+or
+SAVED_MODEL_DIR="../TMP10/bin/rs_pipeline/Pusher/pushed_model" \
+MODEL_VERSION="21" \
+OUTPUT_BASE_DIR="../TMP10" \
+python3 -m unittest src.test.python.movie_lens_retrieval.post_training_analysis.TestAnalysis
+
+
+'''
 import json
 import os
 import shutil
@@ -20,6 +37,11 @@ from sklearn.manifold import TSNE
 import tensorflow as tf
 import numpy as np
 
+# 0 = all logs, 1 = no info, 2 = no info/warn, 3 = no info/warn/error
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="umap")
+
 import sys
 is_cli = __name__ == '__main__' or any('unittest' in arg for arg in sys.argv)
 if is_cli:
@@ -28,12 +50,6 @@ if is_cli:
         os.path.join(os.getcwd(), "src/test/python/movie_lens_retrieval"))
     sys.path.insert(0,
         os.path.join(os.getcwd(), "src/main/python/movie_lens_retrieval"))
-
-# example usage from CLI:
-# export SAVED_MODEL_DIR="../TMP10/bin/rs_pipeline/Pusher/pushed_model"
-# export MODEL_VERSION="21"
-# export OUTPUT_BASE_DIR="../TMP10"
-# python3 -m unittest src.test.python.movie_lens_retrieval.post_training_analysis.TestAnalysis
 
 from helper import get_project_dir, get_bin_dir, \
     get_random_user_and_first_timestamp_from_ratings, \
@@ -51,13 +67,16 @@ class TestAnalysis(unittest.TestCase):
     def setUpClass(cls):
         
         cls.default_top_k = 100
+
+        t = os.environ.get("SAVED_MODEL_DIR")
         
         cls.saved_models_dir = os.environ.get("SAVED_MODEL_DIR", os.path.join(get_project_dir(), "src/main/resources/serving_models"))
-        cls.user_movie_models_dir = os.environ.get("MODEL_VERSION", os.path.join(cls.saved_models_dir, "user_movie_model"))
+        model_version = os.environ.get("MODEL_VERSION", os.path.join(cls.saved_models_dir, "user_movie_model"))
+        cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, model_version)
         
         #temporary change to check latest model
-        cls.saved_models_dir = os.path.join(get_project_dir(), "../TMP10/bin/rs_pipeline/Pusher/pushed_model")
-        cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, "21")
+        #cls.saved_models_dir = os.path.join(get_project_dir(), "../TMP10/bin/rs_pipeline/Pusher/pushed_model")
+        #cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, "21")
         
         output_base_dir = os.environ.get("OUTPUT_BASE_DIR", get_bin_dir())
         cls.summary_output_dir = os.path.join(output_base_dir, "post_training_analysis")
@@ -66,6 +85,9 @@ class TestAnalysis(unittest.TestCase):
         cls.summary_output_conclusions_dict = dict()
         cls.summary_output_metrics_dict = dict()
         
+        if not os.path.exists(TestAnalysis.user_movie_models_dir):
+            raise ValueError(f'directory does not exist: {TestAnalysis.user_movie_models_dir}')
+            
         cls.loaded_user_movie_model = tf.saved_model.load(TestAnalysis.user_movie_models_dir)
         
         test_res_dir = os.path.join(get_project_dir(), "src/test/resources/data")
@@ -146,6 +168,7 @@ class TestAnalysis(unittest.TestCase):
         out_file_path = os.path.join(cls.summary_output_dir,"summary_metrics.json")
         with open(out_file_path, "w") as f:
             json.dump(cls.summary_output_metrics_dict, f, indent=4)
+        print(f'wrote to ==> {cls.summary_output_dir}')
 
     def test_data_shifts(self):
         output_file_path = os.path.join(TestAnalysis.summary_output_dir, "data_shifts.json")
@@ -453,7 +476,8 @@ class TestAnalysis(unittest.TestCase):
                     "ndcg_at_k"),
                 
                 # Expected Random Baselines
-                pl.lit(expected_random_recall).alias("expected_random_recall_at_k"),
+                pl.lit(expected_random_recall).alias(
+                    "expected_random_recall_at_k"),
                 (pl.col("total_positives") / float(catalog_size)).alias(
                     "expected_random_precision_at_k"),
                 (pl.col(
@@ -462,6 +486,7 @@ class TestAnalysis(unittest.TestCase):
             )
             
             res = {
+                f"n_samples_global": metrics_df.height,
                 f"recall_at_{top_k}_mean": metrics_df.select(
                     pl.col("recall_at_k")).mean().item(),
                 f"recall_at_{top_k}_std": metrics_df.select(
@@ -485,6 +510,7 @@ class TestAnalysis(unittest.TestCase):
             for user_tier in (0, 1, 2):
                 df = metrics_df.filter(pl.col("user_tier") == user_tier)
                 res = {
+                    f"n_samples_user_tier_{user_tier}": df.height,
                     f"recall_at_{top_k}_mean_user_tier_{user_tier}": df.select(
                         pl.col("recall_at_k")).mean().item(),
                     f"recall_at_{top_k}_std_user_tier_{user_tier}": df.select(
@@ -508,14 +534,15 @@ class TestAnalysis(unittest.TestCase):
                     pl.col("rating").is_not_null()) + 1.0).log(2)).sum().alias(
                     "dcg_global"),
                 *[(pl.col("rating").is_not_null() & (
-                            pl.col("movie_tier") == tier)).sum().alias(
+                        pl.col("movie_tier") == tier)).sum().alias(
                     f"hits_tier_{tier}") for tier in (0, 1, 2)],
                 *[(1.0 / (pl.col("rank").filter(
                     pl.col("rating").is_not_null() & (
-                                pl.col("movie_tier") == tier)) + 1.0).log(
+                            pl.col("movie_tier") == tier)) + 1.0).log(
                     2)).sum().alias(f"dcg_tier_{tier}") for tier in (0, 1, 2)]
             )
-            metrics_df = metrics_df.join(user_gt_counts, on="user_id", how="inner")
+            metrics_df = metrics_df.join(user_gt_counts, on="user_id",
+                how="inner")
             
             metrics_df = metrics_df.with_columns(
                 pl.int_ranges(1, pl.min_horizontal(pl.col("total_positives"),
@@ -582,6 +609,7 @@ class TestAnalysis(unittest.TestCase):
             )
             
             res = {
+                f"n_samples_global": metrics_df.height,
                 f"recall_at_{top_k}_mean": metrics_df.select(
                     pl.col("recall_global")).mean().item(),
                 f"recall_at_{top_k}_std": metrics_df.select(
@@ -603,14 +631,23 @@ class TestAnalysis(unittest.TestCase):
                 f"ndcg_at_{top_k}_std_random": metrics_df.select(
                     pl.col("expected_random_ndcg")).std().item(),
                 
-                **{f"recall_at_{top_k}_mean_movie_tier_{tier}": metrics_df.select(
-                    pl.col(f"recall_tier_{tier}")).mean().item() for tier in
+                # Dynamic Sample sizes for Movie Tiers based on non-null metrics
+                **{f"n_samples_movie_tier_{tier}": metrics_df.select(
+                    pl.col(f"recall_tier_{tier}").is_not_null().sum()).item()
+                    for tier in (0, 1, 2)},
+                
+                **{
+                    f"recall_at_{top_k}_mean_movie_tier_{tier}": metrics_df.select(
+                        pl.col(f"recall_tier_{tier}")).mean().item() for tier
+                    in
                     (0, 1, 2)},
-                **{f"precision_at_{top_k}_mean_movie_tier_{tier}": metrics_df.select(
+                **{
+                    f"precision_at_{top_k}_mean_movie_tier_{tier}": metrics_df.select(
                         pl.col(f"precision_tier_{tier}")).mean().item() for
                     tier in (0, 1, 2)},
-                **{f"ndcg_at_{top_k}_mean_movie_tier_{tier}": metrics_df.select(
-                    pl.col(f"ndcg_tier_{tier}")).mean().item() for tier in
+                **{
+                    f"ndcg_at_{top_k}_mean_movie_tier_{tier}": metrics_df.select(
+                        pl.col(f"ndcg_tier_{tier}")).mean().item() for tier in
                     (0, 1, 2)}
             }
             agg_res = agg_res | res
@@ -686,15 +723,17 @@ class TestAnalysis(unittest.TestCase):
             agg_res["automated_conclusions"] = conclusions
             
             TestAnalysis.summary_output_metrics_dict.update(**agg_res)
-            del TestAnalysis.summary_output_metrics_dict['automated_conclusions']
+            del TestAnalysis.summary_output_metrics_dict[
+                'automated_conclusions']
             
-            TestAnalysis.summary_output_conclusions_dict[f'stratified_metrics@{top_k}'] = conclusions
+            TestAnalysis.summary_output_conclusions_dict[
+                f'stratified_metrics@{top_k}'] = conclusions
         
         print(f'metrics\n={json.dumps(agg_res, indent=4)}')
         
         with open(output_file_path, "w") as f:
             json.dump(agg_res, f, indent=4)
-        
+    
     def test_coverage(self):
         """
         calculating item coverage as the number of unique movie ids recommended to users / size of movie catalog,
@@ -2170,7 +2209,7 @@ class TestAnalysis(unittest.TestCase):
         print(f'length of {file_tag} is {len(X)}')
         
         # Apply UMAP and plot
-        reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42)
+        reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42, n_jobs=1)
         embedding_2d = reducer.fit_transform(X)
         
         plt.figure(figsize=(10, 8))

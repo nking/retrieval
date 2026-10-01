@@ -20,6 +20,21 @@ from sklearn.manifold import TSNE
 import tensorflow as tf
 import numpy as np
 
+import sys
+is_cli = __name__ == '__main__' or any('unittest' in arg for arg in sys.argv)
+if is_cli:
+    print('** running from CLI **', flush=True)
+    sys.path.insert(0,
+        os.path.join(os.getcwd(), "src/test/python/movie_lens_retrieval"))
+    sys.path.insert(0,
+        os.path.join(os.getcwd(), "src/main/python/movie_lens_retrieval"))
+
+# example usage from CLI:
+# export SAVED_MODEL_DIR="../TMP10/bin/rs_pipeline/Pusher/pushed_model"
+# export MODEL_VERSION="21"
+# export OUTPUT_BASE_DIR="../TMP10"
+# python3 -m unittest src.test.python.movie_lens_retrieval.post_training_analysis.TestAnalysis
+
 from helper import get_project_dir, get_bin_dir, \
     get_random_user_and_first_timestamp_from_ratings, \
     get_stratified_user_and_first_timestamp_from_ratings, \
@@ -37,19 +52,25 @@ class TestAnalysis(unittest.TestCase):
         
         cls.default_top_k = 100
         
-        cls.saved_models_dir = os.path.join(get_project_dir(), "src/main/resources/serving_models")
-        cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, "user_movie_model")
+        cls.saved_models_dir = os.environ.get("SAVED_MODEL_DIR", os.path.join(get_project_dir(), "src/main/resources/serving_models"))
+        cls.user_movie_models_dir = os.environ.get("MODEL_VERSION", os.path.join(cls.saved_models_dir, "user_movie_model"))
         
         #temporary change to check latest model
         cls.saved_models_dir = os.path.join(get_project_dir(), "../TMP10/bin/rs_pipeline/Pusher/pushed_model")
         cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, "21")
-        #self.assertTrue(os.path.exists(cls.user_movie_models_dir))
+        
+        output_base_dir = os.environ.get("OUTPUT_BASE_DIR", get_bin_dir())
+        cls.summary_output_dir = os.path.join(output_base_dir, "post_training_analysis")
+        shutil.rmtree(cls.summary_output_dir, ignore_errors=True)
+        os.makedirs(cls.summary_output_dir, exist_ok=True)
+        cls.summary_output_conclusions_dict = dict()
+        cls.summary_output_metrics_dict = dict()
         
         cls.loaded_user_movie_model = tf.saved_model.load(TestAnalysis.user_movie_models_dir)
         
         test_res_dir = os.path.join(get_project_dir(), "src/test/resources/data")
         
-        cold_start_path = os.path.join(test_res_dir, "cold_start_movies.txt")
+        #cold_start_path = os.path.join(test_res_dir, "cold_start_movies.txt")
         
         users_path = os.path.join(test_res_dir, "users/users.parquet")
         cls.movies_path = os.path.join(test_res_dir, "movies/movies.parquet")
@@ -115,12 +136,6 @@ class TestAnalysis(unittest.TestCase):
         
         cls.movie_catalog_emb_indexer : ScannSearcher = Retriever.build_scann_searcher(embeddings=cls.movie_catalog_embeddings,
             top_k=TestAnalysis.default_top_k)
-        
-        cls.summary_output_dir = os.path.join(get_bin_dir(), "post_training_analysis")
-        shutil.rmtree(cls.summary_output_dir, ignore_errors=True)
-        os.makedirs(cls.summary_output_dir, exist_ok=True)
-        cls.summary_output_conclusions_dict = dict()
-        cls.summary_output_metrics_dict = dict()
     
     @classmethod
     def tearDownClass(cls):

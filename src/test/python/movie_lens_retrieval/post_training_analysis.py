@@ -19,7 +19,21 @@ MODEL_VERSION="21" \
 OUTPUT_BASE_DIR="../TMP10" \
 python3 -m unittest src.test.python.movie_lens_retrieval.post_training_analysis.TestAnalysis
 
-
+metrics calculated:
+- NDCG@k: DCG is a sum of the relevance of results, discounted by their ranks.
+          NDCG is the normalization of DCG by the maximum possible DCG of the results set when
+          ranked from highest to lowest gain.
+- recall@k:  TP/(TP + FN) = TPR = sensitivity = hitrate
+              relevant retrieved instances / all relevant instances
+- precision@k:  TP/ (TP + FP)
+              relevant retrieved instances / all retrieved instances
+- MRR@k:  sum of the inverse of the rank of the results.  consider that each should be first, but
+          was found at rank r.  MRR = (1/n_queries)*sum_{i=1,n_queries)( 1/ r_i )
+- intra-list diversity
+- inter-list diversity
+- coverage
+- embedding hubness
+- popularity bias
 '''
 import json
 import os
@@ -84,6 +98,11 @@ class TestAnalysis(unittest.TestCase):
         os.makedirs(cls.summary_output_dir, exist_ok=True)
         cls.summary_output_conclusions_dict = dict()
         cls.summary_output_metrics_dict = dict()
+        
+        #directories to write the parquet files to for pairwise user metrics comparisons
+        cls.parquet_output_dir = os.path.join(cls.summary_output_dir, "parquet_metrics")
+        os.makedirs(cls.parquet_output_dir, exist_ok=True)
+        
         
         if not os.path.exists(TestAnalysis.user_movie_models_dir):
             raise ValueError(f'directory does not exist: {TestAnalysis.user_movie_models_dir}')
@@ -485,6 +504,11 @@ class TestAnalysis(unittest.TestCase):
                     "idcg_at_k")).alias("expected_random_ndcg_at_k")
             )
             
+            #write to parquet for pair-wise comparison later between models
+            parquet_file_path = os.path.join(TestAnalysis.parquet_output_dir,
+                f"stratified_metrics_top_{top_k}.parquet")
+            metrics_df.write_parquet(parquet_file_path)
+            
             res = {
                 f"n_samples_global": metrics_df.height,
                 f"recall_at_{top_k}_mean": metrics_df.select(
@@ -800,6 +824,10 @@ class TestAnalysis(unittest.TestCase):
                     
             agg_res = agg_res | res
             
+            retrieval_parquet_path = os.path.join(
+                TestAnalysis.parquet_output_dir, f"user_retrievals_top_{top_k}.parquet")
+            retrieval_df.write_parquet(retrieval_parquet_path)
+            
             if True: #top_k != TestAnalysis.default_top_k:
                 #calc Gini coeff
                 res = dict()
@@ -827,6 +855,9 @@ class TestAnalysis(unittest.TestCase):
                     .with_columns(pl.col("retrieval_count").fill_null(0))
                     .sort("retrieval_count") # Must be sorted ascending for Lorenz & Gini math
                 )
+                
+                freq_parquet_path = os.path.join(TestAnalysis.parquet_output_dir, f"item_frequencies_top_{top_k}.parquet")
+                freq_df.write_parquet(freq_parquet_path)
                 
                 n_catalog = freq_df.height
                 total_recs = freq_df["retrieval_count"].sum()
@@ -1179,101 +1210,135 @@ class TestAnalysis(unittest.TestCase):
         
         self.plot_embeddings_umap_tsne(emb_movies_df, outdir, "all_movies",
             stratified_key="movie_tier")
-        
+    
     def test_inter_list_diversity(self):
         
-        output_file_path = os.path.join(TestAnalysis.summary_output_dir, "interlist_diversity.json")
+        output_file_path = os.path.join(TestAnalysis.summary_output_dir,
+            "interlist_diversity.json")
+        # Ensure you have a parquet output directory defined in your class
+        parquet_dir = TestAnalysis.parquet_output_dir
         
         agg_res = dict()
-        
-        # random sample of all users
-        # random sample of stratified tier users
-        # random sample of all users but catalog expanded to include cold-start metrics
-        
         n_samples = 500
-        
         num_catalog_movies = TestAnalysis.model_dict['n_movies']
         
         # ========= random sample of all users ==========================
         
-        pos_test_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
-        pos_test_df = pos_test_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
-        (user_ids, timestamps) = get_random_user_and_first_timestamp_from_ratings(pos_test_df, n_samples)
+        pos_test_df = read_ratings_to_df(
+            TestAnalysis.ratings_dict["positive_test"])
+        pos_test_df = pos_test_df.join(TestAnalysis.user_tiers_df,
+            on="user_id", how="left")
+        (user_ids,
+            timestamps) = get_random_user_and_first_timestamp_from_ratings(
+            pos_test_df, n_samples)
         user_ids = np.expand_dims(user_ids, axis=1)
         timestamps = np.expand_dims(timestamps, axis=1)
         
-        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps) #tf.Tensor shape (5096, 32)
-       
-        #neighbors shape is (n_samples, top_k)
-        neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
+        user_embeddings = self.create_user_embeddings_batch(user_ids,
+            timestamps)
         
-        ## if the dataset samle were > 100_000, we could MinHash to conserve memory
-        ## instead of the fast vectorized matrices with BLAS optimization that
-        ## we use here to calc Jaccard similarity
-        inter_user_diversity, mean_jaccard = self.calculate_exact_inter_user_diversity(
+        neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(
+            user_embeddings)
+        
+        inter_user_diversity, mean_jaccard, user_iud_array = self.calculate_exact_inter_user_diversity(
             neighbors, num_catalog_movies
         )
         
-        res = self.analyze_inter_user_diversity(mean_jaccard, num_catalog_movies,
-            TestAnalysis.default_top_k, "all_users",
-            baseline_jaccard = None
+        # Write Parquet File
+        pl.DataFrame({
+            "user_id": user_ids.flatten(),
+            "inter_list_diversity": user_iud_array
+        }).write_parquet(
+            os.path.join(parquet_dir,
+                f"inter_list_diversity_all_users_top_{TestAnalysis.default_top_k}.parquet")
         )
         
+        res = self.analyze_inter_user_diversity(
+            mean_jaccard, num_catalog_movies, TestAnalysis.default_top_k,
+            "all_users", baseline_jaccard=None
+        )
         agg_res = agg_res | res
         
         # ======= stratified by user_tier ====================
         stratification_key = "user_tier"
         stratification_values: List = [0, 1, 2]
         
-        tier_dict : Dict[int, tuple[np.ndarray, np.ndarray]] = get_stratified_user_and_first_timestamp_from_ratings(
+        tier_dict: Dict[int, tuple[
+            np.ndarray, np.ndarray]] = get_stratified_user_and_first_timestamp_from_ratings(
             ratings_df=pos_test_df,
-            sample_size = n_samples,
-            stratification_key = stratification_key,
-            stratification_values = stratification_values,
+            sample_size=n_samples,
+            stratification_key=stratification_key,
+            stratification_values=stratification_values,
         )
         
         for tier in stratification_values:
-            user_ids, timestamps = tier_dict[tier]
-            user_ids = np.expand_dims(user_ids, axis=1)
-            timestamps = np.expand_dims(timestamps, axis=1)
-            user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
-            # neighbors shape is (n_samples, top_k)
-            neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
-            inter_user_diversity, mean_jaccard = self.calculate_exact_inter_user_diversity(
+            t_user_ids, t_timestamps = tier_dict[tier]
+            t_user_ids = np.expand_dims(t_user_ids, axis=1)
+            t_timestamps = np.expand_dims(t_timestamps, axis=1)
+            user_embeddings = self.create_user_embeddings_batch(t_user_ids,
+                t_timestamps)
+            
+            neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(
+                user_embeddings)
+            inter_user_diversity, mean_jaccard, user_iud_array = self.calculate_exact_inter_user_diversity(
                 neighbors, num_catalog_movies
             )
-            res = self.analyze_inter_user_diversity(mean_jaccard,
-                num_catalog_movies, TestAnalysis.default_top_k, f"user_tier_{tier}",
-                baseline_jaccard=None
+            
+            # Write Parquet File
+            pl.DataFrame({
+                "user_id": t_user_ids.flatten(),
+                "inter_list_diversity": user_iud_array
+            }).write_parquet(
+                os.path.join(parquet_dir,
+                    f"inter_list_diversity_user_tier_{tier}_top_{TestAnalysis.default_top_k}.parquet")
             )
             
+            res = self.analyze_inter_user_diversity(
+                mean_jaccard, num_catalog_movies, TestAnalysis.default_top_k,
+                f"user_tier_{tier}", baseline_jaccard=None
+            )
             agg_res = agg_res | res
-            
-        # ===== cold start movies, adding 501 movies to the movie catalog (501 because its between 10-15% of catalog size and is 167 per movie tier) =====
-        (new_movie_ids, new_movie_embeddings) = self.get_cold_start_movies(pos_test_df)
-        full_movie_embeddings = tf.concat([TestAnalysis.movie_catalog_embeddings, new_movie_embeddings], axis=0)
-        indexer = Retriever.build_scann_searcher(embeddings=full_movie_embeddings, top_k=TestAnalysis.default_top_k)
+        
+        # ===== cold start movies ====================
+        (new_movie_ids, new_movie_embeddings) = self.get_cold_start_movies(
+            pos_test_df)
+        full_movie_embeddings = tf.concat(
+            [TestAnalysis.movie_catalog_embeddings, new_movie_embeddings],
+            axis=0)
+        indexer = Retriever.build_scann_searcher(
+            embeddings=full_movie_embeddings, top_k=TestAnalysis.default_top_k)
         
         num_catalog_movies += len(new_movie_ids)
         
-        (user_ids, timestamps) = get_random_user_and_first_timestamp_from_ratings(pos_test_df, n_samples)
-        user_ids = np.expand_dims(user_ids, axis=1)
-        timestamps = np.expand_dims(timestamps, axis=1)
+        (cs_user_ids,
+            cs_timestamps) = get_random_user_and_first_timestamp_from_ratings(
+            pos_test_df, n_samples)
+        cs_user_ids = np.expand_dims(cs_user_ids, axis=1)
+        cs_timestamps = np.expand_dims(cs_timestamps, axis=1)
         
-        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)  # tf.Tensor shape (5096, 32)
+        user_embeddings = self.create_user_embeddings_batch(cs_user_ids,
+            cs_timestamps)
         
-        # neighbors shape is (n_samples, top_k)
         neighbors, distances = indexer.search_batched(user_embeddings)
         
-        inter_user_diversity, mean_jaccard = self.calculate_exact_inter_user_diversity(
+        inter_user_diversity, mean_jaccard, user_iud_array = self.calculate_exact_inter_user_diversity(
             neighbors, num_catalog_movies
         )
         
-        res = self.analyze_inter_user_diversity(mean_jaccard,
-            num_catalog_movies, TestAnalysis.default_top_k, "all_users_and_catalog_has_cold_start_movies",
-            baseline_jaccard=None
+        # Write Parquet File
+        pl.DataFrame({
+            "user_id": cs_user_ids.flatten(),
+            "inter_list_diversity": user_iud_array
+        }).write_parquet(
+            os.path.join(parquet_dir,
+                f"inter_list_diversity_cold_start_top_{TestAnalysis.default_top_k}.parquet")
         )
         
+        res = self.analyze_inter_user_diversity(
+            mean_jaccard, num_catalog_movies, TestAnalysis.default_top_k,
+            "all_users_and_catalog_has_cold_start_movies",
+            baseline_jaccard=None
+        )
         agg_res = agg_res | res
         
         print("inter_user_diversity\n", json.dumps(agg_res, indent=4))
@@ -1281,10 +1346,55 @@ class TestAnalysis(unittest.TestCase):
         with open(output_file_path, "w") as f:
             json.dump(agg_res, f, indent=4)
     
+    def calculate_exact_inter_user_diversity(self,
+            neighbors: np.ndarray,
+            num_catalog_movies: int
+    ) -> tuple[float, float, np.ndarray]:
+        """
+        Computes exact Inter-User Diversity (1 - Jaccard Similarity) across user slates.
+
+        Args:
+            neighbors: (n_samples, top_k) array of retrieved movie IDs.
+            num_catalog_movies: Total number of movies in the catalog.
+
+        Returns:
+            inter_user_diversity (float): Global average inter-user diversity.
+            mean_jaccard_similarity (float): Global average Jaccard similarity.
+            user_iud_array (np.ndarray): Per-user inter-list diversity scores (shape: n_samples,).
+        """
+        n_samples, top_k = neighbors.shape
+        
+        A = np.zeros((n_samples, num_catalog_movies), dtype=np.float32)
+        
+        row_indices = np.arange(n_samples)[:, None]
+        A[row_indices, neighbors] = 1.0
+        
+        intersections = A @ A.T
+        unions = (2 * top_k) - intersections
+        
+        jaccard_matrix = intersections / (unions + 1e-9)
+        
+        # --- NEW: Calculate Per-User Inter-List Diversity ---
+        # Sum each row, subtract 1.0 (the diagonal where the user intersects 100% with themselves),
+        # and divide by the number of other users to get the user's specific mean overlap.
+        user_mean_jaccard = (np.sum(jaccard_matrix, axis=1) - np.diag(
+            jaccard_matrix)) / (n_samples - 1)
+        user_iud_array = 1.0 - user_mean_jaccard
+        
+        # --- Calculate Global Metrics ---
+        total_jaccard = np.sum(jaccard_matrix).item() - np.trace(jaccard_matrix).item()
+        num_pairs = n_samples * (n_samples - 1)
+        
+        mean_jaccard = float(total_jaccard / num_pairs)
+        inter_user_diversity = 1.0 - mean_jaccard
+        
+        return inter_user_diversity, mean_jaccard, user_iud_array
+    
     def test_intra_list_diversity(self):
         
         output_file_path = os.path.join(TestAnalysis.summary_output_dir, "intralist_diversity.json")
         
+        #pos_test_df has columns user_id, movie_id, rating, timestamp
         pos_test_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
         first_interactions_df = pos_test_df.group_by("user_id").agg(pl.col("timestamp").min())
         user_ids = first_interactions_df["user_id"].to_numpy()
@@ -1292,13 +1402,28 @@ class TestAnalysis(unittest.TestCase):
         user_ids = np.expand_dims(user_ids, axis=1)
         timestamps = first_interactions_df["timestamp"].to_numpy()
         timestamps = np.expand_dims(timestamps, axis=1)
-        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps) #tf.Tensor shape (5096, 32)
+        #user_embeddings is a tf.Tensor with shape (n_users, 32)
+        user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
         
+        #neighbors and distances are the nearest neighbor mobie_ids and distances for each user embeedding in user_Embeddings
+        #neighbors in an np.ndarray of shap (n_samples, top_k)
         neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
         if isinstance(neighbors, np.ndarray):
             neighbors = tf.convert_to_tensor(neighbors, dtype=tf.int32)
         
         res = self.calculate_batched_intra_list_diversity(neighbors, TestAnalysis.movie_catalog_embeddings)
+        
+        # EXTRACT PER-USER DATA AND EXPORT TO PARQUET
+        user_ild_array = res.pop("user_ild_array")
+        user_ild_df = pl.DataFrame({
+            "user_id": user_ids.flatten(),  # Flatten to match the 1D ILD array
+            "intra_list_diversity": user_ild_array
+        })
+        parquet_file_path = os.path.join(
+            TestAnalysis.parquet_output_dir,
+            f"user_ild_top_{TestAnalysis.default_top_k}.parquet"
+        )
+        user_ild_df.write_parquet(parquet_file_path)
         
         TestAnalysis.summary_output_metrics_dict.update(**res)
         del TestAnalysis.summary_output_metrics_dict["automated_conclusions"]
@@ -1506,6 +1631,18 @@ class TestAnalysis(unittest.TestCase):
             user_gt_pop.append(np.mean(gt_pops))
         user_gt_pop = np.array(user_gt_pop)
         
+        #write to parquet
+        user_bias_df = pl.DataFrame({
+            "user_id": gt_grouped["user_id"],
+            "retrieved_log_pop": user_retr_pop,
+            "ground_truth_log_pop": user_gt_pop,
+            "delta_log_pop": user_retr_pop - user_gt_pop
+        })
+        bias_parquet_path = os.path.join(TestAnalysis.parquet_output_dir,
+            f"popularity_bias_{tag}.parquet")
+        user_bias_df.write_parquet(bias_parquet_path)
+        
+        
         # Compute Bias Metrics
         mean_retr_pop = float(np.mean(user_retr_pop))
         mean_gt_pop = float(np.mean(user_gt_pop))
@@ -1700,57 +1837,6 @@ class TestAnalysis(unittest.TestCase):
             f"{dict_tag}_inter_user_diversity_conclusions": conclusions
         }
     
-    def calculate_exact_inter_user_diversity(self,
-            neighbors: np.ndarray,
-            num_catalog_movies: int
-    ) -> tuple[float, float]:
-        """
-        Computes exact Inter-User Diversity (1 - Jaccard Similarity) across user slates.
-
-        Args:
-            neighbors: (n_samples, top_k) array of retrieved movie IDs.
-            num_catalog_movies: Total number of movies in the catalog.
-
-        Returns:
-            inter_user_diversity (float), mean_jaccard_similarity (float)
-        """
-        n_samples, top_k = neighbors.shape
-        
-        # |A union B| = |A| + |B| - |A intersect B| = 2*top_k - |A intersect B|
-        
-        # Create a dense matrix of user-item interactions
-        # Shape: (n_samples, num_catalog_movies). We use float32 for fast BLAS matmul.
-        # if num_catalog_movies were > 100_000 we would use MinHash instead of this method
-        A = np.zeros((n_samples, num_catalog_movies), dtype=np.float32)
-        
-        # Advanced indexing to populate the retrieved items instantly
-        row_indices = np.arange(n_samples)[:, None]
-        A[row_indices, neighbors] = 1.0
-        #for each row in A, the ones are indictors of the neighbors indices
-        #so now it contains indicators for B
-        
-        # Matrix Multiplication to find all pairwise intersections
-        # A @ A.T yields a matrix where element (i,j) is the number of shared items
-        intersections = A @ A.T
-        
-        # Calculate Unions
-        unions = (2 * top_k) - intersections
-        
-        # Calculate pairwise Jaccard Similarity
-        # Add a small epsilon to prevent division by zero in extreme edge cases
-        jaccard_matrix = intersections / (unions + 1e-9)
-        
-        # Extract the average (ignoring the diagonal where users compare to themselves)
-        total_jaccard = np.sum(jaccard_matrix) - np.trace(jaccard_matrix)
-        num_pairs = n_samples * (n_samples - 1)
-        
-        mean_jaccard = float(total_jaccard / num_pairs)
-        
-        # Inter-User Diversity is the complement of Jaccard Similarity
-        inter_user_diversity = 1.0 - mean_jaccard
-        
-        return inter_user_diversity, mean_jaccard
-    
     def calculate_minhash_inter_user_diversity(self,
             neighbors: np.ndarray,
             num_hashes: int = 150
@@ -1811,15 +1897,7 @@ class TestAnalysis(unittest.TestCase):
         """
         Computes average Intra-List Diversity (ILD) across a batch of users,
         estimates the random catalog ILD baseline via Monte Carlo sampling,
-        and returns an automated text analysis.
-
-        Args:
-            neighbors: 2D tensor of retrieved item indices from ScaNN.
-            movie_embeddings: 2D tensor of all item embeddings.
-            num_random_samples: Number of random user slates used to compute random ILD.
-
-        Returns:
-            Dict with keys: 'model_ild', 'random_ild', 'diversity_ratio', and 'analysis'.
+        and returns an automated text analysis along with per-user ILD arrays.
         """
         num_users = tf.shape(neighbors)[0]
         top_k = tf.shape(neighbors)[1]
@@ -1827,27 +1905,24 @@ class TestAnalysis(unittest.TestCase):
         
         # --- Helper: Vectorized ILD calculation for any batch of slates ---
         def _compute_ild(slate_indices: tf.Tensor) -> tf.Tensor:
-            # Fetch embeddings: (batch_size, top_k, 32)
             slate_embeddings = tf.gather(movie_embeddings, slate_indices)
-            
-            # Batch Matrix Multiplication: (batch_size, top_k, top_k)
             sim_matrices = tf.matmul(slate_embeddings, slate_embeddings, transpose_b=True)
             dist_matrices = 1.0 - sim_matrices
             
-            # Zero out self-distances on the diagonal
             n_slates = tf.shape(slate_indices)[0]
             k = tf.shape(slate_indices)[1]
             zeros_diagonal = tf.zeros((n_slates, k), dtype=dist_matrices.dtype)
             dist_matrices = tf.linalg.set_diag(dist_matrices, zeros_diagonal)
             
-            # Pairwise distance sum / total possible pairs
             sum_dists_per_slate = tf.reduce_sum(dist_matrices, axis=[1, 2])
             num_pairs = tf.cast(k * (k - 1), dtype=dist_matrices.dtype)
-            return tf.reduce_mean(sum_dists_per_slate / num_pairs)
+            
+            # RETURN THE PER-SLATE TENSOR INSTEAD OF THE BATCH MEAN
+            return sum_dists_per_slate / num_pairs
         
         # Compute Model ILD
-        model_ild_tf = _compute_ild(neighbors)
-        model_ild = float(model_ild_tf.numpy())
+        model_ild_per_slate = _compute_ild(neighbors)
+        model_ild = float(tf.reduce_mean(model_ild_per_slate).numpy())
         
         # Estimate Empirical Random Baseline ILD
         random_indices = tf.random.uniform(
@@ -1856,10 +1931,10 @@ class TestAnalysis(unittest.TestCase):
             maxval=num_catalog_movies,
             dtype=tf.int32
         )
-        random_ild_tf = _compute_ild(random_indices)
-        random_ild = float(random_ild_tf.numpy())
+        random_ild_per_slate = _compute_ild(random_indices)
+        random_ild = float(tf.reduce_mean(random_ild_per_slate).numpy())
         
-        # Compute Diversity Ratio (% of random catalog diversity retained)
+        # Compute Diversity Ratio
         diversity_ratio = model_ild / random_ild if random_ild > 0 else 0.0
         
         # Automated Text Analysis
@@ -1886,8 +1961,11 @@ class TestAnalysis(unittest.TestCase):
             "ild_movie": round(model_ild, 6),
             "ild_random": round(random_ild, 6),
             "diversity_ratio": round(diversity_ratio, 4),
-            "automated_conclusions": conclusions
+            "automated_conclusions": conclusions,
+            # PASS THE PER-USER ARRAY FOR PARQUET EXPORT
+            "user_ild_array": model_ild_per_slate.numpy()
         }
+    
     
     def get_cold_start_movies(self, pos_test_df: pl.DataFrame) -> Tuple[tf.Tensor, tf.Tensor]:
         

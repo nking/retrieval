@@ -27,6 +27,9 @@ import polars as pl
 import msgpack
 from array_record.python import array_record_module
 import tensorflow as tf
+import hashlib
+from pathlib import Path
+import re
 
 # 0 = all logs, 1 = no info, 2 = no info/warn, 3 = no info/warn/error
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -156,16 +159,7 @@ def write_embeddings(outfile_root_name, ids: tf.Tensor, embeddings: tf.Tensor):
         pa.field("id", pa.int64()),
         pa.field("embedding", pa.list_(pa.float32(), embed_len)),
     ])
-    
-    #write metadata
-    metadata = {
-        "num_records": n_ids,
-        "embed_dim": embed_len,
-        "recommender_systems_git_hash" : WriteTowerProducts.recommender_systems_git_hash
-    }
-    with open(outfile_metadata, "w") as f:
-        json.dump(metadata, f)
-        
+   
     writer_a = None
     writer_p = None
     
@@ -218,6 +212,24 @@ def write_embeddings(outfile_root_name, ids: tf.Tensor, embeddings: tf.Tensor):
     assert(isinstance(actual_data[0]['id'], int))
     assert(isinstance(actual_data[0]['embedding'], list))
     assert (isinstance(actual_data[0]['embedding'][0], float))
+    
+    # ==== write metadata ====
+    md5sum_array_records = get_combined_md5(WriteTowerProducts.output_dir,
+        fr'.*{outfile_root_name}\.array_record$')
+    md5sum_parquets = get_combined_md5(WriteTowerProducts.output_dir,
+        fr'.*{outfile_root_name}\.parquet')
+    ##NOTE: to verify the md5sums fromcommand line, use:
+    #    find . -type f -name "*.log" | sort | xargs cat | md5sum
+    
+    metadata = {
+        "num_records": n_ids,
+        "embed_dim": embed_len,
+        "recommender_systems_git_hash": WriteTowerProducts.recommender_systems_git_hash,
+        "md5sum_array_records" : md5sum_array_records,
+        "md5sum_parquets" : md5sum_parquets
+    }
+    with open(outfile_metadata, "w") as f:
+        json.dump(metadata, f)
     
     ## assert metadata file
     with open(outfile_metadata, "r") as f:
@@ -363,19 +375,6 @@ def write_recommendations(catalog_user_ids, neighbors, distances):
     outfile_metadata = os.path.join(WriteTowerProducts.output_dir,
         "recommended_movies_metadata.json")
     
-    # write metadata
-    metadata = {
-        "num_records": n_ids,
-        "num_recommendations": num_movies,
-        "recommender_systems_git_hash": WriteTowerProducts.recommender_systems_git_hash
-    }
-    with open(outfile_metadata, "w") as f:
-        json.dump(metadata, f)
-    ## assert metadata file
-    with open(outfile_metadata, "r") as f:
-        metatadata_read = json.load(f)
-        assert (metatadata_read == metadata)
-        
     # key  user_id, value={key=movie_id, value=timestamp}
     data = WriteTowerProducts.train_history_df.select(
         ["user_id", "movie_id", "timestamp"]
@@ -477,11 +476,47 @@ def write_recommendations(catalog_user_ids, neighbors, distances):
         if reader is not None:
             reader.close()
     
+    md5sum_array_records = get_combined_md5(WriteTowerProducts.output_dir,
+        r'.*recommended_movies.*\.array_record$')
+    md5sum_parquets = get_combined_md5(WriteTowerProducts.output_dir,
+        r'.*recommended_movies.*\.parquet')
+    ##NOTE: to verify the md5sums fromcommand line, use:
+    #    find . -type f -name "*.log" | sort | xargs cat | md5sum
+    # write metadata
+    
+    metadata = {
+        "num_records": n_ids,
+        "num_recommendations": num_movies,
+        "recommender_systems_git_hash": WriteTowerProducts.recommender_systems_git_hash,
+        "md5sum_array_records" : md5sum_array_records,
+        "md5sum_parquets" : md5sum_parquets
+    }
+    with open(outfile_metadata, "w") as f:
+        json.dump(metadata, f)
+    ## assert metadata file
+    with open(outfile_metadata, "r") as f:
+        metatadata_read = json.load(f)
+        assert (metatadata_read == metadata)
+    
     WriteTowerProducts.wrote_files.append(outfile)
     WriteTowerProducts.wrote_files.append(outfile2)
     WriteTowerProducts.wrote_files.append(pa_outfile)
     WriteTowerProducts.wrote_files.append(pa_outfile2)
     WriteTowerProducts.wrote_files.append(outfile_metadata)
+
+def get_combined_md5(directory, pattern):
+    hasher = hashlib.md5()
+    # Find and sort files alphabetically for consistency
+    files = sorted([p for p in Path(directory).rglob('*') if
+        p.is_file() and re.match(pattern, str(p))])
+    
+    for filepath in files:
+        with open(filepath, 'rb') as f:
+            # Read in chunks to handle large files memory-efficiently
+            for chunk in iter(lambda: f.read(65536), b''):
+                hasher.update(chunk)
+    
+    return hasher.hexdigest()
 
 if __name__ == '__main__':
     unittest.main()

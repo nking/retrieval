@@ -4,7 +4,6 @@ scripts to analysis the trained models from the recommender_systems project.
 some of the analysis is in rust in the ranker project directory inference_src and will be ported
 to python here to have it all in one place
 """
-
 '''
 example usage from CLI:
 
@@ -49,7 +48,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.manifold import TSNE
 import tensorflow as tf
-import numpy as np
 
 # 0 = all logs, 1 = no info, 2 = no info/warn, 3 = no info/warn/error
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -71,14 +69,17 @@ from helper import get_project_dir, get_bin_dir, \
     get_user_and_first_timestamp_from_ratings
 
 from movie_lens_retrieval.MovieData import MovieData, get_movie_tiers_df
-from movie_lens_retrieval.Retriever import Retriever
 from movie_lens_retrieval.UserData import UserData, get_user_tiers_df
+from movie_lens_retrieval.ANNSearcher import *
 from scann.scann_ops.py.scann_ops_pybind import ScannSearcher
 
 class TestAnalysis(unittest.TestCase):
     
     @classmethod
     def setUpClass(cls):
+        
+        cls.AnnSearchType = Index
+        #cls.AnnSearchType = scann.scann_ops_pybind.ScannSearcher
         
         cls.default_top_k = 100
 
@@ -175,7 +176,7 @@ class TestAnalysis(unittest.TestCase):
         cls.movie_tiers_df = get_movie_tiers_df(cls.train_history_df, pl.read_parquet(cls.movies_path))
         cls.user_tiers_df = get_user_tiers_df(cls.train_history_df, pl.read_parquet(users_path))
         
-        cls.movie_catalog_emb_indexer : ScannSearcher = Retriever.build_scann_searcher(embeddings=cls.movie_catalog_embeddings,
+        cls.movie_catalog_emb_indexer : ScannSearcher = cls.build_searcher(embeddings=cls.movie_catalog_embeddings,
             top_k=TestAnalysis.default_top_k)
     
     @classmethod
@@ -189,6 +190,22 @@ class TestAnalysis(unittest.TestCase):
             json.dump(cls.summary_output_metrics_dict, f, indent=4)
         print(f'wrote to ==> {cls.summary_output_dir}')
 
+    @staticmethod
+    def build_searcher(embeddings: Union[tf.Tensor, np.ndarray], top_k: int, normalize:bool=False):
+        if isinstance(TestAnalysis.AnnSearchType, Index):
+            return build_usearch_searcher(embeddings, top_k, normalize)
+        else:
+            return build_scann_searcher(embeddings, top_k, normalize)
+    
+    @staticmethod
+    def search_batch(indexer: Union[Index, ScannSearcher], queries: Union[tf.Tensor, np.ndarray],
+        final_num_neighbors:int):
+        if isinstance(TestAnalysis.AnnSearchType, Index):
+            return indexer.search(queries, final_num_neighbors)
+        else:
+            return indexer.search_batched(queries=queries, final_num_neighbors=final_num_neighbors)
+        
+    
     def test_data_shifts(self):
         output_file_path = os.path.join(TestAnalysis.summary_output_dir, "data_shifts.json")
         
@@ -446,8 +463,9 @@ class TestAnalysis(unittest.TestCase):
                 catalog_size)
             
             # np.ndarrays of shape (n_users, top_k)
-            neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(
+            neighbors, distances = TestAnalysis.search_batch(indexer=TestAnalysis.movie_catalog_emb_indexer,
                 queries=user_embeddings, final_num_neighbors=top_k)
+                
             neighbors += TestAnalysis.MOVIE_OFFSET
             
             retrieval_df = pl.DataFrame({
@@ -784,10 +802,12 @@ class TestAnalysis(unittest.TestCase):
             if top_k == TestAnalysis.default_top_k:
                 indexer = TestAnalysis.movie_catalog_emb_indexer
             else:
-                indexer = Retriever.build_scann_searcher(embeddings=TestAnalysis.movie_catalog_embeddings, top_k=top_k)
+                indexer = TestAnalysis.build_searcher(embeddings=TestAnalysis.movie_catalog_embeddings, top_k=top_k)
             
             res = dict()
-            neighbors, distances = indexer.search_batched(user_embeddings)
+            neighbors, distances = TestAnalysis.search_batch(indexer=indexer,
+                queries=user_embeddings, final_num_neighbors=top_k)
+            
             neighbors += TestAnalysis.MOVIE_OFFSET
             
             retrieval_df = pl.DataFrame({
@@ -1060,7 +1080,8 @@ class TestAnalysis(unittest.TestCase):
             user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
         
             # neighbors shape is (n_samples, top_k).  these are both np.ndarray
-            neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
+            neighbors, distances = TestAnalysis.search_batch(indexer=TestAnalysis.movie_catalog_emb_indexer,
+                queries=user_embeddings, final_num_neighbors=TestAnalysis.default_top_k)
             #chk = full_movie_ids[neighbors]
             neighbors += TestAnalysis.MOVIE_OFFSET
             #are_equal = np.array_equal(chk, neighbors)
@@ -1237,8 +1258,8 @@ class TestAnalysis(unittest.TestCase):
         user_embeddings = self.create_user_embeddings_batch(user_ids,
             timestamps)
         
-        neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(
-            user_embeddings)
+        neighbors, distances = TestAnalysis.search_batch(indexer=TestAnalysis.movie_catalog_emb_indexer,
+            queries=user_embeddings, final_num_neighbors=TestAnalysis.default_top_k)
         
         inter_user_diversity, mean_jaccard, user_iud_array = self.calculate_exact_inter_user_diversity(
             neighbors, num_catalog_movies
@@ -1278,8 +1299,8 @@ class TestAnalysis(unittest.TestCase):
             user_embeddings = self.create_user_embeddings_batch(t_user_ids,
                 t_timestamps)
             
-            neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(
-                user_embeddings)
+            neighbors, distances = TestAnalysis.search_batch(indexer=TestAnalysis.movie_catalog_emb_indexer,
+                queries=user_embeddings, final_num_neighbors=TestAnalysis.default_top_k)
             inter_user_diversity, mean_jaccard, user_iud_array = self.calculate_exact_inter_user_diversity(
                 neighbors, num_catalog_movies
             )
@@ -1305,7 +1326,7 @@ class TestAnalysis(unittest.TestCase):
         full_movie_embeddings = tf.concat(
             [TestAnalysis.movie_catalog_embeddings, new_movie_embeddings],
             axis=0)
-        indexer = Retriever.build_scann_searcher(
+        indexer = TestAnalysis.build_searcher(
             embeddings=full_movie_embeddings, top_k=TestAnalysis.default_top_k)
         
         num_catalog_movies += len(new_movie_ids)
@@ -1319,7 +1340,8 @@ class TestAnalysis(unittest.TestCase):
         user_embeddings = self.create_user_embeddings_batch(cs_user_ids,
             cs_timestamps)
         
-        neighbors, distances = indexer.search_batched(user_embeddings)
+        neighbors, distances = TestAnalysis.search_batch(indexer=indexer,
+                queries=user_embeddings, final_num_neighbors=TestAnalysis.default_top_k)
         
         inter_user_diversity, mean_jaccard, user_iud_array = self.calculate_exact_inter_user_diversity(
             neighbors, num_catalog_movies
@@ -1407,7 +1429,8 @@ class TestAnalysis(unittest.TestCase):
         
         #neighbors and distances are the nearest neighbor mobie_ids and distances for each user embeedding in user_Embeddings
         #neighbors in an np.ndarray of shap (n_samples, top_k)
-        neighbors, distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
+        neighbors, distances = TestAnalysis.search_batch(indexer=TestAnalysis.movie_catalog_emb_indexer,
+            queries=user_embeddings, final_num_neighbors=TestAnalysis.default_top_k)
         if isinstance(neighbors, np.ndarray):
             neighbors = tf.convert_to_tensor(neighbors, dtype=tf.int32)
         
@@ -1515,13 +1538,15 @@ class TestAnalysis(unittest.TestCase):
             
         top_k = TestAnalysis.default_top_k
         
-        new_indexer = Retriever.build_scann_searcher(embeddings=full_movie_embeddings, top_k=top_k)
+        new_indexer = TestAnalysis.build_searcher(embeddings=full_movie_embeddings, top_k=top_k)
     
         #retrieve
         user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
         
-        orig_neighbors, orig_distances = TestAnalysis.movie_catalog_emb_indexer.search_batched(user_embeddings)
-        new_neighbors, new_distances = new_indexer.search_batched(user_embeddings)
+        orig_neighbors, orig_distances = TestAnalysis.search_batch(indexer=TestAnalysis.movie_catalog_emb_indexer,
+                queries=user_embeddings, final_num_neighbors=TestAnalysis.default_top_k)
+        new_neighbors, new_distances = TestAnalysis.search_batch(indexer=new_indexer,
+                queries=user_embeddings, final_num_neighbors=TestAnalysis.default_top_k)
         
         res_original = self.evaluate_retrieval_with_tier_share(user_ids, orig_neighbors, TestAnalysis.MOVIE_OFFSET, candidate_pool_df, top_k=top_k)
         res_new = self.evaluate_retrieval_with_tier_share(user_ids, new_neighbors, TestAnalysis.MOVIE_OFFSET, candidate_pool_df, top_k=top_k)

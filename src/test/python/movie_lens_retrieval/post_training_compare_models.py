@@ -204,7 +204,7 @@ def _compare_model_metrics(
         evaluate_metric(ild_file, "user_id", "intra_list_diversity",
             f"ILD@{top_k}")
         
-        #inter_list_diviersity
+        #inter_list_diversity
         evaluate_metric(
             f"inter_list_diversity_all_users_top_{top_k}.parquet",
             "user_id", "inter_list_diversity",
@@ -312,8 +312,8 @@ def run_compare(analysis_dir_1: str, analysis_dir_2: str,
             tag_1=tag_1, tag_2=tag_2, top_k=top_k
         )
         
-        if not quiet:
-            print(df_results)
+        #if not quiet:
+        print(df_results)
         
         key_col = "Metric"
         res = {

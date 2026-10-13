@@ -11,6 +11,7 @@ from collections import defaultdict
 from array_record.python import array_record_module
 import msgpack
 
+from movie_lens_retrieval import ANNSearcher
 from movie_lens_retrieval.MovieData import MovieData
 from movie_lens_retrieval.UserData import UserData
 
@@ -394,39 +395,7 @@ class Retriever:
         # https://github.com/google-research/google-research/blob/master/scann/docs/example.ipynb
         # https://github.com/google-research/google-research/blob/master/scann/docs/algorithms.md
         """
-        builder = scann.scann_ops_pybind.builder(db=embeddings,
-            num_neighbors=top_k, distance_measure="dot_product")
-        
-        n_embeddings = tf.shape(embeddings)[0]
-        if n_embeddings < 20000:
-            return builder.score_brute_force(quantize=False).build()
-        
-        # Rule of thumb: num_leaves should be roughly sqrt(N)
-        # We cap it at 100,000 for extremely large datasets
-        n_leaves = int(n_embeddings**0.5)
-        
-        # We search ~5-10% of leaves to maintain high recall
-        n_leaves_to_search = max(20, n_leaves // 20)
-        
-        builder = builder.tree(
-            num_leaves=n_leaves,
-            num_leaves_to_search=n_leaves_to_search,
-            training_sample_size=min(n_embeddings, 250000)
-        )
-        
-        # Add Asymmetric Hashing (AH)
-        # This is worth doing for almost any dataset over 10k
-        builder = builder.score_ah(
-            dimensions_per_block=2,
-            anisotropic_quantization_threshold=0.2
-        )
-        
-        # Rescore (Reordering)
-        # We re-rank a small fraction of the top AH results with brute-force math
-        # for 100% precision on the final top_k.
-        builder = builder.reorder(reordering_num_neighbors=top_k * 10)
-        
-        return builder.build()
+        return ANNSearcher.build_scann_searcher(embeddings=embeddings, top_k=top_k)
     
     def get_cold_start_movie_recommendations(self, top_k: int = 100):
         return self.cold_start_movie_list[:top_k].copy()

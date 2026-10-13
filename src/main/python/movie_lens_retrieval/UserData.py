@@ -12,8 +12,8 @@ class UserData(object):
         :param users_path: path to the users.dat file containing fields user_id, gender, age, occupation, zipcode.
         For now, provide a parquet file.  Also note that the user_ids must be ordered from 1 to N.
         """
-        if not users_path.endswith(".array_record"):
-            print(f'WARNING: expecting input file to be a array_record file')
+        if not users_path.endswith(".parquet"):
+            print(f'WARNING: expecting input file to be a parquet file')
             
         df = pl.read_parquet(users_path)
         df = df.sort('user_id')

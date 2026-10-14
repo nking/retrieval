@@ -5,8 +5,7 @@ These tower products are used in training and inference in the ranker project.
 
 example usage from CLI:
 
-export SAVED_MODEL_DIR="../TMP10/bin/rs_pipeline/Pusher/pushed_model"
-export MODEL_VERSION="21"
+export PIPELINE_DATA_DIR="../TMP10/bin/rs_pipeline"
 export OUTPUT_BASE_DIR="../TMP10"
 python3 -m unittest src.test.python.movie_lens_retrieval.write_tower_products.WriteTowerProducts
 
@@ -59,9 +58,18 @@ class WriteTowerProducts(unittest.TestCase):
         
         cls.default_top_k = 100
         
-        cls.saved_models_dir = os.environ.get("SAVED_MODEL_DIR", os.path.join(get_project_dir(), "src/main/resources/serving_models"))
-        model_version = os.environ.get("MODEL_VERSION", os.path.join(cls.saved_models_dir, "user_movie_model"))
-        cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, model_version)
+        pipeline_dir = os.environ.get("PIPELINE_DATA_DIR", None)
+        if pipeline_dir:
+            if not os.path.exists(pipeline_dir):
+                raise ValueError(f"{pipeline_dir} does not exist")
+            pushed_dir = os.path.join(pipeline_dir, "Pusher/pushed_model")
+            if not os.path.exists(pushed_dir):
+                raise ValueError(f"{pushed_dir} does not exist")
+            push_version = get_largest_subdir_version(pushed_dir)
+            cls.user_movie_models_dir = os.path.join(pushed_dir, push_version)
+        else:
+            saved_models_dir = os.path.join(get_project_dir(), "src/main/resources/serving_models")
+            cls.user_movie_models_dir = os.path.join(saved_models_dir, "user_movie_model")
         
         output_base_dir = os.environ.get("OUTPUT_BASE_DIR", get_bin_dir())
         cls.output_dir = os.path.join(output_base_dir, "tower_products")
@@ -517,6 +525,15 @@ def get_combined_md5(directory, pattern):
                 hasher.update(chunk)
     
     return hasher.hexdigest()
+
+def get_largest_subdir_version(parent_dir: str) -> str:
+    parent_dir = Path(parent_dir)
+    numeric_dirs = [d for d in parent_dir.iterdir() if
+        d.is_dir() and d.name.isdigit()]
+    if numeric_dirs:
+        largest_dir = max(numeric_dirs, key=lambda d: int(d.name))
+        return largest_dir.name
+    raise ValueError("No numeric subdirectories found.")
 
 if __name__ == '__main__':
     unittest.main()

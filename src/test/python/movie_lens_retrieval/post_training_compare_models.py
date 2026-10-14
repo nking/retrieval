@@ -6,13 +6,11 @@ to python here to have it all in one place
 """
 import json
 import os
-import glob
 import shutil
 import subprocess
 import argparse
-from typing import Dict, Any, Tuple
-from scipy import stats
-import polars as pl
+from pathlib import Path
+from typing import Tuple
 
 # 0 = all logs, 1 = no info, 2 = no info/warn, 3 = no info/warn/error
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -34,11 +32,9 @@ example usages from CLI
  
 python3 src/test/python/movie_lens_retrieval/post_training_compare_models.py \
 --analyze_and_compare \
---SAVED_MODEL_DIR_1=../TMP10/bin/rs_pipeline/Pusher/pushed_model \
---MODEL_VERSION_1="21" \
+--PIPELINE_DATA_DIR_1=../TMP10/bin/rs_pipeline \
 --OUTPUT_BASE_DIR_1="../TMP10" \
---SAVED_MODEL_DIR_2=../TMP11/bin/rs_pipeline/Pusher/pushed_model \
---MODEL_VERSION_2="21" \
+--PIPELINE_DATA_DIR_2=../TMP11/bin/rs_pipeline \
 --OUTPUT_BASE_DIR_2="../TMP11" \
 --TAG_1="high-t-model" \
 --TAG_2="low-t-model" \
@@ -48,11 +44,9 @@ python3 src/test/python/movie_lens_retrieval/post_training_compare_models.py \
 python -m debugpy --listen 5678 --wait-for-client \
 src/test/python/movie_lens_retrieval/post_training_compare_models.py \
 --analyze_and_compare \
---SAVED_MODEL_DIR_1=../TMP10/bin/rs_pipeline/Pusher/pushed_model \
---MODEL_VERSION_1="21" \
+--PIPELINE_DATA_DIR_1=../TMP10/bin/rs_pipeline \
 --OUTPUT_BASE_DIR_1="../TMP10" \
---SAVED_MODEL_DIR_2=../TMP11/bin/rs_pipeline/Pusher/pushed_model \
---MODEL_VERSION_2="21" \
+--PIPELINE_DATA_DIR_2=../TMP11/bin/rs_pipeline \
 --OUTPUT_BASE_DIR_2="../TMP11" \
 --TAG_1="high-t-model" \
 --TAG_2="low-t-model" \
@@ -70,10 +64,10 @@ python3 src/test/python/movie_lens_retrieval/post_training_compare_models.py \
 --OUTPUT_COMPARE_DIR="../TMP10_TMP11_Compare"
 '''
 
-from helper import get_project_dir, get_bin_dir
+from helper import get_project_dir
 
-def run_analysis(saved_model_dir: str, model_version: str, output_dir: str,
-        quiet: bool = False) -> str:
+def run_analysis(pipeline_dir: str, output_dir: str, quiet: bool = False) -> str:
+    
     script_path = os.path.join(get_project_dir(),
         "src/test/python/movie_lens_retrieval/post_training_analysis.py")
     # export SAVED_MODEL_DIR="../TMP10/bin/rs_pipeline/Pusher/pushed_model"
@@ -81,8 +75,7 @@ def run_analysis(saved_model_dir: str, model_version: str, output_dir: str,
     # export OUTPUT_BASE_DIR="../TMP10"
     # python3 -m unittest src.test.python.movie_lens_retrieval.post_training_analysis.TestAnalysis
     env = os.environ.copy()
-    env["SAVED_MODEL_DIR"] = saved_model_dir
-    env["MODEL_VERSION"] = model_version
+    env["PIPELINE_DATA_DIR"] = pipeline_dir
     env["OUTPUT_BASE_DIR"] = output_dir
         
     stdout_setting = subprocess.DEVNULL if args.quiet else None
@@ -540,6 +533,14 @@ def _get_summary_metrics_dictionary(analysis_dir_path:str):
     with open(file_path, "r") as f:
         return json.load(f)
     
+def get_largest_subdir_version(parent_dir: str) -> str:
+    parent_dir = Path(parent_dir)
+    numeric_dirs = [d for d in parent_dir.iterdir() if
+        d.is_dir() and d.name.isdigit()]
+    if numeric_dirs:
+        largest_dir = max(numeric_dirs, key=lambda d: int(d.name))
+        return largest_dir.name
+    raise ValueError("No numeric subdirectories found.")
     
 if __name__ == '__main__':
     
@@ -549,18 +550,13 @@ if __name__ == '__main__':
         "--analyze_and_compare",
         action="store_true",
         help="analyze and compare the retrieval from 2 bi-encoders."
-             "Note that if set, requires SAVED_MODEL_DIR_1, MODEL_VERSION_1, OUTPUT_BASE_DIR_1 and the same with _2 endings for the 2nd model",
+             "Note that if set, requires PIPELINE_DATA_DIR_1, OUTPUT_BASE_DIR_1 and the same with _2 endings for the 2nd model",
         required=False
     )
     for v in ("1", "2"):
         parser.add_argument(
-            f"--SAVED_MODEL_DIR_{v}", type=str,
-            help="path to saved_model directory.  path should not contain version.",
-            required=False
-        )
-        parser.add_argument(
-            f"--MODEL_VERSION_{v}", type=str,
-            help=f"The version for SAVED_MODEL_DIR_{v}",
+            f"--PIPELINE_DATA_DIR_{v}", type=str,
+            help="path to the tfx pipeline data holding Pushed directory.",
             required=False
         )
         parser.add_argument(
@@ -613,16 +609,15 @@ if __name__ == '__main__':
     num_catalog_movies = args_dict.get("NUM_CATALOG_MOVIES")
     
     if args_dict.get("analyze_and_compare"):
-        saved_model_dir_1 = args_dict.get("SAVED_MODEL_DIR_1")
-        saved_model_dir_2 = args_dict.get("SAVED_MODEL_DIR_2")
-        model_version_1 = args_dict.get("MODEL_VERSION_1")
-        model_version_2 = args_dict.get("MODEL_VERSION_2")
+        pipeline_dir_1 = args_dict.get("PIPELINE_DATA_DIR_1")
+        pipeline_dir_2 = args_dict.get("PIPELINE_DATA_DIR_2")
+    
         output_dir_1 = args_dict.get("OUTPUT_BASE_DIR_1")
         output_dir_2 = args_dict.get("OUTPUT_BASE_DIR_2")
         
-        input_base_dir_1 = run_analysis(saved_model_dir_1, model_version_1, output_dir_1, quiet=quiet)
+        input_base_dir_1 = run_analysis(pipeline_dir_1, output_dir_1, quiet=quiet)
         print(f'wrote to {input_base_dir_1}')
-        input_base_dir_2 = run_analysis(saved_model_dir_2, model_version_2, output_dir_2, quiet=quiet)
+        input_base_dir_2 = run_analysis(pipeline_dir_2, output_dir_2, quiet=quiet)
         print(f'wrote to {input_base_dir_2}')
     
     elif args_dict.get("compare"):

@@ -4,17 +4,17 @@ scripts to analysis the trained models from the recommender_systems project.
 some of the analysis is in rust in the ranker project directory inference_src and will be ported
 to python here to have it all in one place
 """
+from pathlib import Path
+
 '''
 example usage from CLI:
 
-export SAVED_MODEL_DIR="../TMP10/bin/rs_pipeline/Pusher/pushed_model"
-export MODEL_VERSION="21"
+export PIPELINE_DATA_DIR="../TMP10/bin/rs_pipeline"
 export OUTPUT_BASE_DIR="../TMP10"
 python3 -m unittest src.test.python.movie_lens_retrieval.post_training_analysis.TestAnalysis
 
 or
-SAVED_MODEL_DIR="../TMP10/bin/rs_pipeline/Pusher/pushed_model" \
-MODEL_VERSION="21" \
+PIPELINE_DATA_DIR="../TMP10/bin/rs_pipeline" \
 OUTPUT_BASE_DIR="../TMP10" \
 python3 -m unittest src.test.python.movie_lens_retrieval.post_training_analysis.TestAnalysis
 
@@ -85,13 +85,20 @@ class TestAnalysis(unittest.TestCase):
 
         t = os.environ.get("SAVED_MODEL_DIR")
         
-        cls.saved_models_dir = os.environ.get("SAVED_MODEL_DIR", os.path.join(get_project_dir(), "src/main/resources/serving_models"))
-        model_version = os.environ.get("MODEL_VERSION", os.path.join(cls.saved_models_dir, "user_movie_model"))
-        cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, model_version)
+        #defaults to the last run model in the recommender_systems bin directory
+        pipeline_dir = os.environ.get("PIPELINE_DATA_DIR",
+            os.path.join(get_project_dir(), "../recommender_systems/bin/rs_pipeline"))
+        if not os.path.exists(pipeline_dir):
+            raise ValueError(f"{pipeline_dir} does not exist")
+        cls.pushed_dir = os.path.join(pipeline_dir, "Pusher/pushed_model")
+        if not os.path.exists(cls.pushed_dir):
+            raise ValueError(f"{cls.pushed_dir} does not exist")
         
-        #temporary change to check latest model
-        #cls.saved_models_dir = os.path.join(get_project_dir(), "../TMP10/bin/rs_pipeline/Pusher/pushed_model")
-        #cls.user_movie_models_dir = os.path.join(cls.saved_models_dir, "21")
+        push_version = get_largest_subdir_version(cls.pushed_dir)
+        saved_model_dir = os.path.join(cls.pushed_dir, push_version)
+        if not os.path.exists(saved_model_dir):
+            raise ValueError(f"{saved_model_dir} does not exist")
+        cls.user_movie_models_dir = saved_model_dir
         
         output_base_dir = os.environ.get("OUTPUT_BASE_DIR", get_bin_dir())
         cls.summary_output_dir = os.path.join(output_base_dir, "post_training_analysis")
@@ -103,7 +110,6 @@ class TestAnalysis(unittest.TestCase):
         #directories to write the parquet files to for pairwise user metrics comparisons
         cls.parquet_output_dir = os.path.join(cls.summary_output_dir, "parquet_metrics")
         os.makedirs(cls.parquet_output_dir, exist_ok=True)
-        
         
         if not os.path.exists(TestAnalysis.user_movie_models_dir):
             raise ValueError(f'directory does not exist: {TestAnalysis.user_movie_models_dir}')
@@ -2405,6 +2411,14 @@ class TestAnalysis(unittest.TestCase):
         plt.savefig(out_file_path, dpi=300, bbox_inches="tight")
         plt.close()
     
+def get_largest_subdir_version(parent_dir: str) -> str:
+    parent_dir = Path(parent_dir)
+    numeric_dirs = [d for d in parent_dir.iterdir() if
+        d.is_dir() and d.name.isdigit()]
+    if numeric_dirs:
+        largest_dir = max(numeric_dirs, key=lambda d: int(d.name))
+        return largest_dir.name
+    raise ValueError("No numeric subdirectories found.")
 
 def read_ratings_to_df(file_path:str, batch_size:int=2048) -> pl.DataFrame:
     if not os.path.exists(file_path):

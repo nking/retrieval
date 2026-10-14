@@ -9,7 +9,20 @@ export PIPELINE_DATA_DIR="../TMP10/bin/rs_pipeline"
 export OUTPUT_BASE_DIR="../TMP10"
 python3 -m unittest src.test.python.movie_lens_retrieval.write_tower_products.WriteTowerProducts
 
+NOTE: nothing in here uses the src/test/resources/data embeddings or recommendations.
 """
+import os
+import sys
+is_cli = __name__ == '__main__' or any('unittest' in arg for arg in sys.argv)
+if is_cli:
+    print('** running from CLI **', flush=True)
+    sys.path.insert(0,
+        os.path.join(os.getcwd(), "src/test/python/movie_lens_retrieval"))
+    sys.path.insert(0,
+        os.path.join(os.getcwd(), "src/main/python/movie_lens_retrieval"))
+    
+from find_pushed_trainer_uri import get_pushed_trainer_uri
+
 from movie_lens_retrieval.MovieData import MovieData
 from movie_lens_retrieval.UserData import UserData
 
@@ -18,7 +31,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 import json
-import os
 import shutil
 import unittest
 from typing import Any, Union, Tuple
@@ -59,34 +71,30 @@ class WriteTowerProducts(unittest.TestCase):
         cls.default_top_k = 100
         
         pipeline_dir = os.environ.get("PIPELINE_DATA_DIR", None)
-        if pipeline_dir:
-            if not os.path.exists(pipeline_dir):
-                raise ValueError(f"{pipeline_dir} does not exist")
-            pushed_dir = os.path.join(pipeline_dir, "Pusher/pushed_model")
-            if not os.path.exists(pushed_dir):
-                raise ValueError(f"{pushed_dir} does not exist")
-            push_version = get_largest_subdir_version(pushed_dir)
-            cls.user_movie_models_dir = os.path.join(pushed_dir, push_version)
+        pusher_dir = os.environ.get("PUSHER_URI", None)
+        if pipeline_dir or pusher_dir:
+            if not pusher_dir:
+                saved_model_uri, _ = get_pushed_trainer_uri()
+            else:
+                saved_model_uri = pusher_dir
         else:
-            saved_models_dir = os.path.join(get_project_dir(), "src/main/resources/serving_models")
-            cls.user_movie_models_dir = os.path.join(saved_models_dir, "user_movie_model")
+            saved_model_uri = os.path.join(get_project_dir(), "src/main/resources/serving_models", "user_movie_model")
+        if not os.path.exists(saved_model_uri):
+            raise ValueError(f'directory does not exist: {saved_model_uri}')
         
         output_base_dir = os.environ.get("OUTPUT_BASE_DIR", get_bin_dir())
         cls.output_dir = os.path.join(output_base_dir, "tower_products")
         shutil.rmtree(cls.output_dir, ignore_errors=True)
         os.makedirs(cls.output_dir, exist_ok=True)
-        
-        if not os.path.exists(WriteTowerProducts.user_movie_models_dir):
-            raise ValueError(f'directory does not exist: {WriteTowerProducts.user_movie_models_dir}')
             
-        cls.loaded_user_movie_model = tf.saved_model.load(WriteTowerProducts.user_movie_models_dir)
+        cls.loaded_user_movie_model = tf.saved_model.load(saved_model_uri)
         
         test_res_dir = os.path.join(get_project_dir(), "src/test/resources/data")
         
         cls.users_path = os.path.join(test_res_dir, "users/users.parquet")
         cls.movies_path = os.path.join(test_res_dir, "movies/movies.parquet")
         
-        cls.model_dict = read_model_assets_hparams(WriteTowerProducts.user_movie_models_dir)
+        cls.model_dict = read_model_assets_hparams(saved_model_uri)
         cls.MOVIE_OFFSET: int = cls.model_dict['n_users'] + 1
         embed_dim = json.loads(cls.model_dict['layer_sizes'])[-1]
         cls.user_id_range_incl = [1, cls.model_dict['n_users']]
@@ -129,12 +137,12 @@ class WriteTowerProducts(unittest.TestCase):
         # Tuple[tf.Tensor, tf.Tensor]
         catalog_movie_ids, movie_catalog_embeddings = create_movie_catalog_embeddings()
         
-        write_embeddings("movie_emb", catalog_movie_ids, movie_catalog_embeddings)
+        write_embeddings("movie_emb", catalog_movie_ids, movie_catalog_embeddings, key="movie")
         
         #Tuple[tf.Tensor, tf.Tensor]
         catalog_user_ids, timestamps, user_catalog_embeddings = create_user_catalog_embeddings()
 
-        write_embeddings("user_emb", catalog_user_ids, user_catalog_embeddings)
+        write_embeddings("user_emb", catalog_user_ids, user_catalog_embeddings, key="user")
 
         ## ===   write recommendations  =====
         n_search = int(tf.shape(movie_catalog_embeddings)[0])
@@ -153,47 +161,67 @@ class WriteTowerProducts(unittest.TestCase):
             return build_usearch_searcher(embeddings, top_k, normalize)
         else:
             return build_scann_searcher(embeddings, top_k, normalize)
-    
-def write_embeddings(outfile_root_name, ids: tf.Tensor, embeddings: tf.Tensor):
+            
+def write_embeddings(outfile_root_name, ids: tf.Tensor, embeddings: tf.Tensor, key:str="user"):
     
     embed_len = int(tf.shape(embeddings)[1])
     n_ids = int(tf.shape(ids)[0])
+    key_id = f"{key}_id"
     
+    #adding -00000-of-00001 to arrayrecord and parquet to match apache beam outputs
     outfile_metadata = os.path.join(WriteTowerProducts.output_dir, f"{outfile_root_name}_metadata.json")
-    outfile_array_record = os.path.join(WriteTowerProducts.output_dir, f"{outfile_root_name}.array_record")
-    outfile_parquet = os.path.join(WriteTowerProducts.output_dir, f"{outfile_root_name}.parquet")
-    
+    outfile_array_record = os.path.join(WriteTowerProducts.output_dir, f"{outfile_root_name}-00000-of-00001.array_record")
+    outfile_parquet = os.path.join(WriteTowerProducts.output_dir, f"{outfile_root_name}-00000-of-00001.parquet")
+    outfile_tfrecord = os.path.join(WriteTowerProducts.output_dir, f"{outfile_root_name}-00000-of-00001.tfrecord.gz")
+
     pa_schema = pa.schema([
         pa.field("id", pa.int64()),
         pa.field("embedding", pa.list_(pa.float32(), embed_len)),
     ])
+    
+    options = tf.io.TFRecordOptions(compression_type='GZIP')
    
     writer_a = None
     writer_p = None
-    
+    writer_t = None
     try:
         writer_a = array_record_module.ArrayRecordWriter(
             outfile_array_record, 'group_size:1')
         writer_p = pq.ParquetWriter(outfile_parquet, pa_schema)
+        writer_t = tf.io.TFRecordWriter(outfile_tfrecord, options=options)
         
         #TODO: consider improving these to write more efficient blocks
         for (id, embedding) in zip(ids.numpy(), embeddings.numpy()):
             id = id.item()
             embedding = embedding.tolist()
             writer_a.write(msgpack.packb((id, embedding)))
+            
             pa_batch = pa.RecordBatch.from_arrays([
                 pa.array([id], type=pa.int32()),
                 pa.array([embedding], type=pa.list_(pa.int32(), embed_len))
             ], schema=pa_schema)
             writer_p.write_batch(pa_batch)
+            
+            feature = {
+                key_id: tf.train.Feature(
+                    int64_list=tf.train.Int64List(value=[id])),
+                'embedding': tf.train.Feature(
+                    float_list=tf.train.FloatList(value=embedding))
+            }
+            example_proto = tf.train.Example(
+                features=tf.train.Features(feature=feature)
+            )
+            writer_t.write(example_proto.SerializeToString())
     
     finally:
         if writer_a is not None:
             writer_a.close()
         if writer_p is not None:
             writer_p.close()
-            
-    #spot assert that can read files
+        if writer_t is not None:
+            writer_t.close()
+    
+    #spot assert can read files
     reader = None
     try:
         reader = array_record_module.ArrayRecordReader(outfile_array_record)
@@ -213,13 +241,29 @@ def write_embeddings(outfile_root_name, ids: tf.Tensor, embeddings: tf.Tensor):
         if reader is not None:
             reader.close()
     
-    ## asserrt the parquet file
+    ## assert the parquet file
     table = pq.read_table(outfile_parquet)
     actual_data = table.to_pylist()
     assert(len(actual_data) == count)
     assert(isinstance(actual_data[0]['id'], int))
     assert(isinstance(actual_data[0]['embedding'], list))
     assert (isinstance(actual_data[0]['embedding'][0], float))
+    
+    # assert the tfrecord file
+    feature_description = {
+        key_id: tf.io.FixedLenFeature([], tf.int64),
+        'embedding': tf.io.VarLenFeature(tf.float32)
+    }
+    def _parse_function(proto):
+        # Parse the individual example proto
+        return tf.io.parse_single_example(proto, feature_description)
+    dataset = tf.data.TFRecordDataset(outfile_tfrecord, compression_type="GZIP")
+    for raw_record in dataset.take(5):
+        parsed = _parse_function(raw_record)
+        id = parsed[key_id].numpy().item()
+        embedding = tf.sparse.to_dense(parsed['embedding']).numpy().tolist()
+        assert(isinstance(id, int))
+        assert(isinstance(embedding[0], float))
     
     # ==== write metadata ====
     md5sum_array_records = get_combined_md5(WriteTowerProducts.output_dir,

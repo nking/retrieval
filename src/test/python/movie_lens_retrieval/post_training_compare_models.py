@@ -62,6 +62,8 @@ python3 src/test/python/movie_lens_retrieval/post_training_compare_models.py \
 --TAG_1="high-t-model" \
 --TAG_2="low-t-model" \
 --OUTPUT_COMPARE_DIR="../TMP10_TMP11_Compare"
+
+NOTE: nothing in here uses the src/test/resources/data embeddings or recommendations.
 '''
 
 from helper import get_project_dir
@@ -617,6 +619,7 @@ if __name__ == '__main__':
         
         input_base_dir_1 = run_analysis(pipeline_dir_1, output_dir_1, quiet=quiet)
         print(f'wrote to {input_base_dir_1}')
+        
         input_base_dir_2 = run_analysis(pipeline_dir_2, output_dir_2, quiet=quiet)
         print(f'wrote to {input_base_dir_2}')
     

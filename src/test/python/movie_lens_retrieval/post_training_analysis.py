@@ -2,7 +2,9 @@
 scripts to analysis the trained models from the recommender_systems project.
 
 some of the analysis is in rust in the ranker project directory inference_src and will be ported
-to python here to have it all in one place
+to python here to have it all in one place.
+
+NOTE: nothing in here uses the src/test/resources/data embeddings or recommendations.
 """
 from pathlib import Path
 
@@ -68,6 +70,8 @@ from helper import get_project_dir, get_bin_dir, \
     get_stratified_user_and_first_timestamp_from_ratings, \
     get_user_and_first_timestamp_from_ratings
 
+from find_pushed_trainer_uri import get_pushed_trainer_uri
+
 from movie_lens_retrieval.MovieData import MovieData, get_movie_tiers_df
 from movie_lens_retrieval.UserData import UserData, get_user_tiers_df
 from movie_lens_retrieval.ANNSearcher import *
@@ -82,23 +86,20 @@ class TestAnalysis(unittest.TestCase):
         #cls.AnnSearchType = scann.scann_ops_pybind.ScannSearcher
         
         cls.default_top_k = 100
-
-        t = os.environ.get("SAVED_MODEL_DIR")
         
         #defaults to the last run model in the recommender_systems bin directory
         pipeline_dir = os.environ.get("PIPELINE_DATA_DIR",
             os.path.join(get_project_dir(), "../recommender_systems/bin/rs_pipeline"))
         if not os.path.exists(pipeline_dir):
-            raise ValueError(f"{pipeline_dir} does not exist")
-        cls.pushed_dir = os.path.join(pipeline_dir, "Pusher/pushed_model")
-        if not os.path.exists(cls.pushed_dir):
-            raise ValueError(f"{cls.pushed_dir} does not exist")
+            raise ValueError(f"'{pipeline_dir}' does not exist")
         
-        push_version = get_largest_subdir_version(cls.pushed_dir)
-        saved_model_dir = os.path.join(cls.pushed_dir, push_version)
+        if not os.environ.get("PUSHER_URI", None):
+            pusher_uri, trainer_uri = get_pushed_trainer_uri()
+            saved_model_dir = pusher_uri
+        else:
+            saved_model_dir = os.environ.get("PUSHER_URI")
         if not os.path.exists(saved_model_dir):
             raise ValueError(f"{saved_model_dir} does not exist")
-        cls.user_movie_models_dir = saved_model_dir
         
         output_base_dir = os.environ.get("OUTPUT_BASE_DIR", get_bin_dir())
         cls.summary_output_dir = os.path.join(output_base_dir, "post_training_analysis")
@@ -111,10 +112,7 @@ class TestAnalysis(unittest.TestCase):
         cls.parquet_output_dir = os.path.join(cls.summary_output_dir, "parquet_metrics")
         os.makedirs(cls.parquet_output_dir, exist_ok=True)
         
-        if not os.path.exists(TestAnalysis.user_movie_models_dir):
-            raise ValueError(f'directory does not exist: {TestAnalysis.user_movie_models_dir}')
-            
-        cls.loaded_user_movie_model = tf.saved_model.load(TestAnalysis.user_movie_models_dir)
+        cls.loaded_user_movie_model = tf.saved_model.load(saved_model_dir)
         
         test_res_dir = os.path.join(get_project_dir(), "src/test/resources/data")
         
@@ -123,7 +121,7 @@ class TestAnalysis(unittest.TestCase):
         users_path = os.path.join(test_res_dir, "users/users.parquet")
         cls.movies_path = os.path.join(test_res_dir, "movies/movies.parquet")
         
-        cls.model_dict = read_model_assets_hparams(TestAnalysis.user_movie_models_dir)
+        cls.model_dict = read_model_assets_hparams(saved_model_dir)
         cls.MOVIE_OFFSET: int = cls.model_dict['n_users'] + 1
         embed_dim = json.loads(cls.model_dict['layer_sizes'])[-1]
         cls.user_id_range_incl = [1, cls.model_dict['n_users']]

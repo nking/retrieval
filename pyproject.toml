@@ -42,4 +42,4 @@ Homepage = "https://www.kaggle.com/code/nicholeasuniquename/recommender-systems/
 Repository = "https://github.com/nking/retrieval.git"
 
 [project.optional-dependencies]
-test = ["pytest", ]
+test = ["pytest", "ml-metadata-1.21.0"]

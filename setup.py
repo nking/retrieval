@@ -14,7 +14,7 @@ setup(
     'polars>=1.35.2', 'umap_learn==0.5.12', 'seaborn==0.13.2',
     'usearch==2.26.0'
   ],
-  extras_require={"test": ["pytest"]},
+  extras_require={"test": ["pytest", "ml-metadata-1.21.0"]},
   classifiers=[ 'Natural Language :: English',
                'Programming Language :: Python :: 3.10',
                'Programming Language :: Python :: 3.11',

@@ -80,7 +80,7 @@ def run_analysis(pipeline_dir: str, output_dir: str, quiet: bool = False) -> str
     env["PIPELINE_DATA_DIR"] = pipeline_dir
     env["OUTPUT_BASE_DIR"] = output_dir
         
-    stdout_setting = subprocess.DEVNULL if args.quiet else None
+    stdout_setting = subprocess.DEVNULL if quiet else None
     
     result = subprocess.run(["python3", script_path], env=env,
         stdout=stdout_setting)
@@ -218,12 +218,12 @@ def _compare_model_metrics(
                 f"Inter-List Diversity (User Tier {tier})@{top_k}"
             )
     
-    # Popularity Bias (Joined on user_id)
-    #['user_id', 'retrieved_log_pop', 'ground_truth_log_pop', 'delta_log_pop']
-    for user_tier in [0, 1, 2]:
-        pop_file = f"popularity_bias_user_tier_{user_tier}.parquet"
-        evaluate_metric(pop_file, "user_id", "delta_log_pop",
-            f"Delta Log Pop (User Tier {user_tier})")
+        # Popularity Bias (Joined on user_id)
+        #['user_id', 'retrieved_log_pop', 'ground_truth_log_pop', 'delta_log_pop']
+        for user_tier in [0, 1, 2]:
+            pop_file = f"popularity_bias_user_tier_{user_tier}.parquet"
+            evaluate_metric(pop_file, "user_id", "delta_log_pop",
+                f"Delta Log Pop (User Tier {user_tier})")
     
     # Item Frequencies (Joined on movie_id)
     #['movie_id', 'movie_tier', 'retrieval_count']
@@ -239,7 +239,12 @@ def run_compare(analysis_dir_1: str, analysis_dir_2: str,
         output_compare_dir: str,
         tag_1: str, tag_2: str, num_catalog_movies: int,
         quiet: bool = False) -> str:
-    shutil.rmtree(output_compare_dir, ignore_errors=True)
+
+    resolved_out = Path(output_compare_dir).resolve()
+    if resolved_out in (Path.cwd().resolve(), Path.cwd().parent.resolve(), Path("/").resolve()):
+        raise ValueError(f"Refusing to wipe unsafe directory: {resolved_out}")
+    shutil.rmtree(resolved_out, ignore_errors=True)
+
     os.makedirs(output_compare_dir, exist_ok=True)
     
     parquet_dir_1 = os.path.join(analysis_dir_1, "parquet_metrics")
@@ -420,8 +425,6 @@ def _bootstrap_global_metrics(
     Samples users with replacement, reconstructs the global recommendation distribution,
     and calculates confidence intervals for the paired differences.
     """
-    
-    #['user_id', 'movie_id', 'movie_tier', 'user_tier']
     path_1 = os.path.join(dir_1, f"user_retrievals_top_{top_k}.parquet")
     path_2 = os.path.join(dir_2, f"user_retrievals_top_{top_k}.parquet")
     
@@ -429,12 +432,32 @@ def _bootstrap_global_metrics(
         return {}, [
             f"[*] Skipping Bootstrap @{top_k}: user_retrievals parquet missing."]
     
-    df1 = pl.read_parquet(path_1).select(["user_id", "movie_id"])
-    df2 = pl.read_parquet(path_2).select(["user_id", "movie_id"])
+    # Determine MOVIE_OFFSET and catalog size from the full-catalog item_frequencies file
+    freq_path_1 = os.path.join(dir_1, f"item_frequencies_top_{top_k}.parquet")
+    if os.path.exists(freq_path_1):
+        catalog_df = pl.read_parquet(freq_path_1).select("movie_id")
+        movie_offset = int(catalog_df["movie_id"].min())
+        num_catalog_movies = catalog_df.height
+    else:
+        # Fallback if item_frequencies is missing (MovieLens 1M: 6040 users + 1)
+        movie_offset = 6041
+        num_catalog_movies = int(num_catalog_movies)
+
+    # Shift movie_id back to 0-based catalog indices [0, num_catalog_movies - 1]
+    df1 = pl.read_parquet(path_1).select([
+        pl.col("user_id"),
+        (pl.col("movie_id") - movie_offset).alias("movie_id")
+    ])
+    df2 = pl.read_parquet(path_2).select([
+        pl.col("user_id"),
+        (pl.col("movie_id") - movie_offset).alias("movie_id")
+    ])
     
     # Extract overlapping users to ensure paired testing
-    common_users = np.intersect1d(df1["user_id"].unique().to_numpy(),
-        df2["user_id"].unique().to_numpy())
+    common_users = np.intersect1d(
+        df1["user_id"].unique().to_numpy(),
+        df2["user_id"].unique().to_numpy()
+    )
     n_users = len(common_users)
     
     if n_users == 0:
@@ -446,7 +469,6 @@ def _bootstrap_global_metrics(
     
     # Helper: Group movies by user into a list of lists for fast random sampling
     def _build_user_item_matrix(df: pl.DataFrame) -> np.ndarray:
-        # Sort by user_id to ensure indices align perfectly between df1 and df2
         grouped = df.sort("user_id").group_by("user_id",
             maintain_order=True).agg(pl.col("movie_id"))
         return grouped["movie_id"].to_numpy()
@@ -454,37 +476,36 @@ def _bootstrap_global_metrics(
     matrix_1 = _build_user_item_matrix(df1)
     matrix_2 = _build_user_item_matrix(df2)
     
-    # Internal Global Metric Calculators
+    # Internal Global Metric Calculators (operating on 0-based catalog array of length num_catalog_movies)
     def calc_coverage(freqs):
         return np.count_nonzero(freqs) / num_catalog_movies
     
     def calc_gini(freqs):
-        f = np.sort(freqs[freqs > 0])  # Filter zeros to analyze distribution among retrieved items
-        if len(f) == 0: return 0
+        # freqs has exact length num_catalog_movies; 0s represent unretrieved catalog movies
+        f = np.sort(freqs)
+        if len(f) == 0 or f[-1] == 0:
+            return 0.0
         cum_sum = np.cumsum(f)
         return (len(f) + 1 - 2 * np.sum(cum_sum) / cum_sum[-1]) / len(f)
     
     def calc_entropy(freqs):
+        # Filter > 0 only to avoid log(0) since 0 * log(0) = 0 in Shannon entropy
         p = freqs[freqs > 0] / np.sum(freqs)
         return -np.sum(p * np.log(p))
     
-    # Output storage
-    metrics = {"Coverage": [], "Gini": [], "Uniformity_Entropy": []}
     diffs = {"Coverage": [], "Gini": [], "Uniformity_Entropy": []}
     
     # --- Bootstrap Loop ---
     for _ in range(n_iterations):
-        # Sample users with replacement
         idx = np.random.randint(0, n_users, size=n_users)
         
-        # Reconstruct global frequencies for this sample
         items_1 = np.concatenate(matrix_1[idx])
         items_2 = np.concatenate(matrix_2[idx])
         
+        # Both freqs_1 and freqs_2 now have exact shape (num_catalog_movies,)
         freqs_1 = np.bincount(items_1, minlength=num_catalog_movies)
         freqs_2 = np.bincount(items_2, minlength=num_catalog_movies)
         
-        # Calculate paired metrics
         cov1, cov2 = calc_coverage(freqs_1), calc_coverage(freqs_2)
         gin1, gin2 = calc_gini(freqs_1), calc_gini(freqs_2)
         ent1, ent2 = calc_entropy(freqs_1), calc_entropy(freqs_2)
@@ -492,8 +513,7 @@ def _bootstrap_global_metrics(
         diffs["Coverage"].append(cov1 - cov2)
         diffs["Gini"].append(gin1 - gin2)
         diffs["Uniformity_Entropy"].append(ent1 - ent2)
-    
-    # --- Statistical Summaries ---
+
     results_dict = {}
     conclusions = [
         f"\n--- Bootstrap Global Metrics @{top_k} ({n_iterations} samples) ---"]
@@ -530,11 +550,7 @@ def _bootstrap_global_metrics(
     
     return results_dict, conclusions
 
-def _get_summary_metrics_dictionary(analysis_dir_path:str):
-    file_path = os.path.join(analysis_dir_path, "summary_metrics.json")
-    with open(file_path, "r") as f:
-        return json.load(f)
-    
+ 
 def get_largest_subdir_version(parent_dir: str) -> str:
     parent_dir = Path(parent_dir)
     numeric_dirs = [d for d in parent_dir.iterdir() if
@@ -595,7 +611,7 @@ if __name__ == '__main__':
         help="Suppress stdout from the test script"
     )
     parser.add_argument(
-        f"--NUM_CATALOG_MOVIES", type=str,
+        f"--NUM_CATALOG_MOVIES", type=int,
         help=f"number of movies in the catalog",
         default=3883,
         required=False
@@ -611,6 +627,10 @@ if __name__ == '__main__':
     num_catalog_movies = args_dict.get("NUM_CATALOG_MOVIES")
     
     if args_dict.get("analyze_and_compare"):
+        for k in ("PIPELINE_DATA_DIR_1", "PIPELINE_DATA_DIR_2", "OUTPUT_BASE_DIR_1", "OUTPUT_BASE_DIR_2"):
+            if not args_dict.get(k) or not str(args_dict.get(k)).strip():
+                parser.error(f"--analyze_and_compare requires a non-empty --{k}")
+
         pipeline_dir_1 = args_dict.get("PIPELINE_DATA_DIR_1")
         pipeline_dir_2 = args_dict.get("PIPELINE_DATA_DIR_2")
     

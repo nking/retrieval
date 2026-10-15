@@ -101,8 +101,13 @@ class TestAnalysis(unittest.TestCase):
         if not os.path.exists(saved_model_dir):
             raise ValueError(f"{saved_model_dir} does not exist")
         
-        output_base_dir = os.environ.get("OUTPUT_BASE_DIR", get_bin_dir())
+        raw_output_base = os.environ.get("OUTPUT_BASE_DIR", "").strip()
+        output_base_dir = raw_output_base if raw_output_base else get_bin_dir()
+
         cls.summary_output_dir = os.path.join(output_base_dir, "post_training_analysis")
+        if os.path.basename(cls.summary_output_dir) != "post_training_analysis":
+            raise ValueError(f"Unsafe summary_output_dir: {cls.summary_output_dir}")
+
         shutil.rmtree(cls.summary_output_dir, ignore_errors=True)
         os.makedirs(cls.summary_output_dir, exist_ok=True)
         cls.summary_output_conclusions_dict = dict()
@@ -196,7 +201,7 @@ class TestAnalysis(unittest.TestCase):
 
     @staticmethod
     def build_searcher(embeddings: Union[tf.Tensor, np.ndarray], top_k: int, normalize:bool=False):
-        if isinstance(TestAnalysis.AnnSearchType, Index):
+        if issubclass(TestAnalysis.AnnSearchType, Index):
             return build_usearch_searcher(embeddings, top_k, normalize)
         else:
             return build_scann_searcher(embeddings, top_k, normalize)
@@ -204,7 +209,7 @@ class TestAnalysis(unittest.TestCase):
     @staticmethod
     def search_batch(indexer: Union[Index, ScannSearcher], queries: Union[tf.Tensor, np.ndarray],
         final_num_neighbors:int):
-        if isinstance(TestAnalysis.AnnSearchType, Index):
+        if issubclass(TestAnalysis.AnnSearchType, Index):
             return indexer.search(queries, final_num_neighbors)
         else:
             return indexer.search_batched(queries=queries, final_num_neighbors=final_num_neighbors)
@@ -250,7 +255,9 @@ class TestAnalysis(unittest.TestCase):
             
             pos_movie_counts = (df.select( pl.col("rating").ge(3) ).sum()).item()
             movie_counts = (df.select(pl.col("movie_id")).sum()).item()
-            res[f"P_Y_{name}"] = pos_movie_counts / movie_counts
+            #res[f"P_Y_{name}"] = pos_movie_counts / movie_counts
+            ratings_counts = df.height
+            res[f"P_Y_{name}"] = pos_movie_counts / ratings_counts
             
             #P(X|Y=1) stratified by movie_tier
             df = read_ratings_to_df(TestAnalysis.ratings_dict[f'positive_{name}'])
@@ -1025,17 +1032,17 @@ class TestAnalysis(unittest.TestCase):
                     
                     # Insight 4: User Cohort Behavior
                     gini_power = res.get(f"gini_at_{top_k}_user_tier_2", 1.0)
-                    gini_light = res.get(f"ginie_at_{top_k}_user_tier_0", 1.0)
+                    gini_light = res.get(f"gini_at_{top_k}_user_tier_0", 1.0)
                     
                     if gini_power < gini_light - 0.02:  # 0.02 buffer for noise
                         conclusions.append(
-                            "USER PERSONALIZATION at_{top_k}: Power users exhibit lower Gini (more diverse slates) than light users, successfully leveraging rich interaction histories.")
+                            f"USER PERSONALIZATION at_{top_k}: Power users exhibit lower Gini (more diverse slates) than light users, successfully leveraging rich interaction histories.")
                     elif gini_power > gini_light + 0.02:
                         conclusions.append(
-                            "WARNING (COHORT COLLAPSE) at_{top_k}: Power users have higher concentration (Gini) than light users. The model may be pulling rich histories into dense popularity traps.")
+                            f"WARNING (COHORT COLLAPSE) at_{top_k}: Power users have higher concentration (Gini) than light users. The model may be pulling rich histories into dense popularity traps.")
                     else:
                         conclusions.append(
-                            "UNIFORM COHORTS at_{top_k}: Light and Power users experience roughly the same level of catalog concentration.")
+                            f"UNIFORM COHORTS at_{top_k}: Light and Power users experience roughly the same level of catalog concentration.")
                 
                 res["automated_conclusions"] = conclusions
                 
@@ -1094,6 +1101,7 @@ class TestAnalysis(unittest.TestCase):
             tier_history_df = history_df.filter(pl.col(stratification_key)==tier)
             tag = f"{stratification_key}_{tier}"
             res = self.evaluate_popularity_bias(
+                user_ids=user_ids.squeeze(),
                 neighbors=neighbors,  # shape: (n_users, top_k)
                 ground_truth_df = tier_ground_truth_df,  # Test set (positives only)
                 train_history_df = tier_history_df,  # Train set (positives only)
@@ -1530,7 +1538,7 @@ class TestAnalysis(unittest.TestCase):
         new_embeddings : tf.Tensor = _create_movie_embeddings_batch(new_inputs)
         new_embeddings = new_embeddings.numpy()
         
-        full_movie_embeddings = TestAnalysis.movie_catalog_embeddings.numpy()
+        full_movie_embeddings = TestAnalysis.movie_catalog_embeddings.numpy().copy()
         
         #for each new_movie_ids, replace with embedding for new_movie_ids.
         #this not only subtracts the old and inserts the new, but gives them the same index so that they
@@ -1601,6 +1609,7 @@ class TestAnalysis(unittest.TestCase):
         return float(np.sum(np.abs(cdf_0 - cdf_1)))/max_emd
     
     def evaluate_popularity_bias(self,
+            user_ids: np.ndarray,
             neighbors: np.ndarray,  # shape: (n_users, top_k)
             ground_truth_df: pl.DataFrame,  # Test set (positives only)
             train_history_df: pl.DataFrame,  # Train set (positives only)
@@ -1645,39 +1654,40 @@ class TestAnalysis(unittest.TestCase):
             user_retr_pop.append(np.mean(slate_pops))
         user_retr_pop = np.array(user_retr_pop)
         
+        retr_df = pl.DataFrame({
+            "user_id" : user_ids,
+            "retrieved_log_pop": user_retr_pop
+        })
         # Calculate Average Log-Popularity for Ground Truth Test Items
         # Group the test DataFrame by user_id
         gt_grouped = (
             ground_truth_df
             .group_by("user_id")
             .agg(pl.col("movie_id").alias("gt_movies"))
+            .with_columns(
+                pl.col("gt_movies").map_elements(
+                    lambda movies: float(np.mean([pop_map.get(m_id, 0.0) for m_id in movies])),
+                    return_dtype=pl.Float64
+                ).alias("ground_truth_log_pop")
+            )
         )
         
-        user_gt_pop = []
-        for row in gt_grouped.iter_rows():
-            gt_movies = row[1]
-            gt_pops = [pop_map.get(m_id, 0.0) for m_id in gt_movies]
-            user_gt_pop.append(np.mean(gt_pops))
-        user_gt_pop = np.array(user_gt_pop)
-        
         #write to parquet
-        user_bias_df = pl.DataFrame({
-            "user_id": gt_grouped["user_id"],
-            "retrieved_log_pop": user_retr_pop,
-            "ground_truth_log_pop": user_gt_pop,
-            "delta_log_pop": user_retr_pop - user_gt_pop
-        })
+        user_bias_df = (
+            retr_df.join(gt_grouped.select(["user_id", "ground_truth_log_pop"]), 
+                on="user_id", how="inner")
+            .with_columns((pl.col("retrieved_log_pop") 
+                - pl.col("ground_truth_log_pop")).alias("delta_log_pop"))
+        )
         bias_parquet_path = os.path.join(TestAnalysis.parquet_output_dir,
             f"popularity_bias_{tag}.parquet")
         user_bias_df.write_parquet(bias_parquet_path)
         
-        
         # Compute Bias Metrics
-        mean_retr_pop = float(np.mean(user_retr_pop))
-        mean_gt_pop = float(np.mean(user_gt_pop))
-        
-        delta_pop = float(np.mean(user_retr_pop - user_gt_pop))
-        std_delta_pop = float(np.std(user_retr_pop - user_gt_pop))
+        mean_retr_pop = float(user_bias_df["retrieved_log_pop"].mean())
+        mean_gt_pop = float(user_bias_df["ground_truth_log_pop"].mean())
+        delta_pop = float(user_bias_df["delta_log_pop"].mean())
+        std_delta_pop = float(user_bias_df["delta_log_pop"].std())
         
         # Amplification Ratio (Retrieved / Ground Truth)
         amplification_ratio = mean_retr_pop / max(1e-9, mean_gt_pop)

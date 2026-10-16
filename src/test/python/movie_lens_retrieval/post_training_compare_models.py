@@ -87,7 +87,7 @@ def run_analysis(pipeline_dir: str, output_dir: str, quiet: bool = False) -> str
     if result.returncode == 0:
         print("model analyzed")
     else:
-        print("model analysis failed.")
+        raise Exception("model analysis failed.")
     
     return os.path.join(output_dir, "post_training_analysis")
 

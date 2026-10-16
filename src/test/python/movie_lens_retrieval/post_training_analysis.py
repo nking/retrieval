@@ -210,7 +210,10 @@ class TestAnalysis(unittest.TestCase):
     def search_batch(indexer: Union[Index, ScannSearcher], queries: Union[tf.Tensor, np.ndarray],
         final_num_neighbors:int):
         if issubclass(TestAnalysis.AnnSearchType, Index):
-            return indexer.search(queries, final_num_neighbors)
+            if isinstance(queries, tf.Tensor):
+                queries = queries.numpy()
+            matches = indexer.search(queries, final_num_neighbors)
+            return matches.keys, matches.distances
         else:
             return indexer.search_batched(queries=queries, final_num_neighbors=final_num_neighbors)
         
@@ -254,8 +257,6 @@ class TestAnalysis(unittest.TestCase):
             res[f"P_Y|X_{name}"] = norm_hit_rates
             
             pos_movie_counts = (df.select( pl.col("rating").ge(3) ).sum()).item()
-            movie_counts = (df.select(pl.col("movie_id")).sum()).item()
-            #res[f"P_Y_{name}"] = pos_movie_counts / movie_counts
             ratings_counts = df.height
             res[f"P_Y_{name}"] = pos_movie_counts / ratings_counts
             
@@ -806,6 +807,7 @@ class TestAnalysis(unittest.TestCase):
         user_ids, timestamps = get_user_and_first_timestamp_from_ratings(pos_test_df)
         user_ids = np.expand_dims(user_ids, axis=1)
         timestamps = np.expand_dims(timestamps, axis=1)
+        #tf.Tensor
         user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
         
         for top_k in [TestAnalysis.default_top_k, 20]:
@@ -1051,11 +1053,7 @@ class TestAnalysis(unittest.TestCase):
                 agg_res = agg_res | res
         
         TestAnalysis.summary_output_metrics_dict.update(**agg_res)
-        for top_k in [TestAnalysis.default_top_k, 20]:
-            try:
-                del TestAnalysis.summary_output_metrics_dict[f"eval_k_{top_k}"]['automated_conclusions']
-            except Exception:
-                pass
+        TestAnalysis.summary_output_metrics_dict.pop('automated_conclusions', None)
         
         print(f'\n', json.dumps(agg_res, indent=4))
         with open(output_file_path, "w") as f:

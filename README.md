@@ -19,8 +19,12 @@ see scripts src/test/python/movie_lens_retrieval/post_training_eda.py
 instructions:
   set up a virtual environment using conda or virtualenv
   with a python version that is >= 3.10.0
+
+  this project uses:
+      conda create -q --name py_311 python=3.11 -y
   
   activate the virtual environment
+    conda activate py_311
 
   to install the dependencies, the easiest way is to
   install this project:

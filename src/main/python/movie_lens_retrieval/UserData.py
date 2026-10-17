@@ -9,6 +9,10 @@ class UserData(object):
     def __init__(self, users_path:str):
         """
         given path to user file, creates a datastructure for user_id access
+        
+        NOTE that request to the Tower endoers use 64 bit integers,
+        but that embeddings get written using 32 bit integers
+        
         :param users_path: path to the users.dat file containing fields user_id, gender, age, occupation, zipcode.
         For now, provide a parquet file.  Also note that the user_ids must be ordered from 1 to N.
         """
@@ -16,6 +20,7 @@ class UserData(object):
             print(f'WARNING: expecting input file to be a parquet file')
             
         df = pl.read_parquet(users_path)
+        
         df = df.sort('user_id')
         self.gender = tf.constant(df['gender'].to_numpy(), name='user_gender', dtype=tf.string)
         self.age = tf.constant(df['age'].to_numpy(), name='user_age', dtype=tf.int64)

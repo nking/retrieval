@@ -173,8 +173,8 @@ class WriteTowerProducts(unittest.TestCase):
                 cls.ratings_dict['positive_train'])
         else:
             cls.train_history_df = pl.DataFrame(
-                schema={"user_id": pl.Int64, "movie_id": pl.Int64,
-                    "rating": pl.Int64, "timestamp": pl.Int64})
+                schema={"user_id": pl.Int32, "movie_id": pl.Int32,
+                    "rating": pl.Int32, "timestamp": pl.Int64})
             logger.warning(
                 "positive_train rating file missing; initialized empty train_history_df.")
         
@@ -233,6 +233,7 @@ class WriteTowerProducts(unittest.TestCase):
 
 def write_embeddings(outfile_root_name, ids: tf.Tensor, embeddings: tf.Tensor,
         key: str = "user"):
+    
     embed_len = int(tf.shape(embeddings)[1])
     n_ids = int(tf.shape(ids)[0])
     key_id = f"{key}_id"
@@ -240,6 +241,9 @@ def write_embeddings(outfile_root_name, ids: tf.Tensor, embeddings: tf.Tensor,
     if n_ids == 0:
         raise ValueError(
             f"Cannot write embeddings for {outfile_root_name}: IDs tensor is empty.")
+    
+    #cast movie_ids from 64 bit to 32 bit
+    ids = tf.cast(ids, dtype=tf.int32)
     
     outfile_metadata = os.path.join(WriteTowerProducts.output_dir,
         f"{outfile_root_name}_metadata.json")
@@ -251,7 +255,7 @@ def write_embeddings(outfile_root_name, ids: tf.Tensor, embeddings: tf.Tensor,
         f"{outfile_root_name}-00000-of-00001.tfrecord.gz")
     
     pa_schema = pa.schema([
-        pa.field("id", pa.int64()),
+        pa.field("id", pa.int32()),
         pa.field("embedding", pa.list_(pa.float32(), embed_len)),
     ])
     
@@ -273,14 +277,15 @@ def write_embeddings(outfile_root_name, ids: tf.Tensor, embeddings: tf.Tensor,
             writer_a.write(msgpack.packb((uid_val, emb_list)))
             
             pa_batch = pa.RecordBatch.from_arrays([
-                pa.array([uid_val], type=pa.int64()),
+                pa.array([uid_val], type=pa.int32()),
                 pa.array([emb_list], type=pa.list_(pa.float32(), embed_len))
             ], schema=pa_schema)
             writer_p.write_batch(pa_batch)
             
             feature = {
                 key_id: tf.train.Feature(
-                    int64_list=tf.train.Int64List(value=[uid_val])),
+                    int64_list=tf.train.Int64List(value=[int(uid_val)])
+                ),
                 'embedding': tf.train.Feature(
                     float_list=tf.train.FloatList(value=emb_list))
             }
@@ -330,7 +335,7 @@ def write_embeddings(outfile_root_name, ids: tf.Tensor, embeddings: tf.Tensor,
     
     # Assert tfrecord file
     try:
-        feature_description = {
+        feature_description = {#tf has to use 64 bit ints
             key_id: tf.io.FixedLenFeature([], tf.int64),
             'embedding': tf.io.VarLenFeature(tf.float32)
         }

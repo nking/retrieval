@@ -9,6 +9,10 @@ class MovieData(object):
     def __init__(self, movie_path:str, offset:int=6041):
         """
         given path to movie file, creates a datastructure for movie_id access
+        
+        NOTE: request to CandidateModel use 64 bit integers for ids
+        but that movie embeddings get written to files using 32 bit integers
+        
         :param movie_path: path to the users.dat file containing fields movie_id, title, genrese.
         For now, provide a parquet file.  Also note that the user_ids must be ordered from 1 to N.
         :param offset: these movie_ids already in the movies.dat file begin with offset and end with offset + n_movies.

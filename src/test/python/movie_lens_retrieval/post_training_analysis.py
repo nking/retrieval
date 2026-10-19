@@ -1030,7 +1030,7 @@ class TestAnalysis(unittest.TestCase):
                             f"HEAD HEAVY at_{top_k}: The top 10% of items consume {top_10_share:.1%} of all recommendation slots.")
                     else:
                         conclusions.append(
-                            f"DIVERSE HEADat_{top_k}: The top 10% consume {top_10_share:.1%} of slots, leaving plenty of room for the torso/tail.")
+                            f"DIVERSE HEAD at_{top_k}: The top 10% consume {top_10_share:.1%} of slots, leaving plenty of room for the torso/tail.")
                     
                     # Insight 4: User Cohort Behavior
                     gini_power = res.get(f"gini_at_{top_k}_user_tier_2", 1.0)
@@ -1224,7 +1224,7 @@ class TestAnalysis(unittest.TestCase):
     
     def test_plot_tsne_umap_movie_embeddings(self):
         
-        outdir = os.path.join(TestAnalysis.summary_output_dir, "embedding_plots")
+        outdir = os.path.join(TestAnalysis.summary_output_dir, "movie_embedding_plots")
         shutil.rmtree(outdir, ignore_errors=True)
         os.makedirs(outdir, exist_ok=True)
        
@@ -1241,6 +1241,33 @@ class TestAnalysis(unittest.TestCase):
         
         self.plot_embeddings_umap_tsne(emb_movies_df, outdir, "all_movies",
             stratified_key="movie_tier")
+    
+    def test_plot_tsne_umap_user_embeddings(self):
+        
+        outdir = os.path.join(TestAnalysis.summary_output_dir,
+            "user_embedding_plots")
+        shutil.rmtree(outdir, ignore_errors=True)
+        os.makedirs(outdir, exist_ok=True)
+        
+        #plotting using all ratings, bT)
+        pos_ratings_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
+        pos_ratings_df = pos_ratings_df.join(TestAnalysis.train_history_df,
+            on="user_id", how="left")
+        
+        user_ids0, timestamps = get_user_and_first_timestamp_from_ratings(pos_ratings_df)
+        user_ids = np.expand_dims(user_ids0, axis=1)
+        timestamps = np.expand_dims(timestamps, axis=1)
+        user_embeddings : tf.Tensor = self.create_user_embeddings_batch(user_ids, timestamps)
+        
+        emb_df = pl.DataFrame({
+            "user_id": user_ids0,
+            "embedding": user_embeddings.numpy()
+        })
+        
+        emb_df = emb_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
+        
+        self.plot_embeddings_umap_tsne(emb_df, outdir, "all_users",
+            stratified_key="user_tier")
     
     def test_inter_list_diversity(self):
         

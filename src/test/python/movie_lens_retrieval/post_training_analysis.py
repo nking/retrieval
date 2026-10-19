@@ -1360,6 +1360,7 @@ class TestAnalysis(unittest.TestCase):
         # ===== cold start movies ====================
         (new_movie_ids, new_movie_embeddings) = self.get_cold_start_movies(
             pos_test_df)
+        #concatenate the new embeddings onto the end of the original
         full_movie_embeddings = tf.concat(
             [TestAnalysis.movie_catalog_embeddings, new_movie_embeddings],
             axis=0)
@@ -1367,7 +1368,7 @@ class TestAnalysis(unittest.TestCase):
             embeddings=full_movie_embeddings, top_k=TestAnalysis.default_top_k)
         
         num_catalog_movies += len(new_movie_ids)
-        
+
         (cs_user_ids,
             cs_timestamps) = get_random_user_and_first_timestamp_from_ratings(
             pos_test_df, n_samples)
@@ -2048,12 +2049,17 @@ class TestAnalysis(unittest.TestCase):
         id0 = TestAnalysis.movie_id_range_incl[-1] + 1
         new_movie_ids = np.array([i for i in range(id0, id0 + len(original_movie_ids))])
         
+        n_movie_ids = len(new_movie_ids)
+        zeroes = np.zeros(n_movie_ids, dtype=np.int64)
+        
         original_movie_ids = np.expand_dims(original_movie_ids, axis=1)
         new_movie_ids = np.expand_dims(new_movie_ids, axis=1)
+        zeroes = np.expand_dims(zeroes, axis=1)
         
         original_inputs = TestAnalysis.movie_data.get_movie(original_movie_ids)
         new_inputs = original_inputs.copy()
-        new_inputs["movie_id"] = tf.constant(new_movie_ids)
+        #replace IDs with the OOV 0
+        new_inputs["movie_id"] = tf.constant(zeroes)
         
         # original_embeddings : tf.Tensor = _create_movie_embeddings_batch(original_inputs)
         new_embeddings: tf.Tensor = _create_movie_embeddings_batch(new_inputs)
@@ -2363,7 +2369,7 @@ class TestAnalysis(unittest.TestCase):
             s=15,
             alpha=0.8
         )
-        plt.title(f"Movie Embedding UMAP Projection by {stratified_key} ({file_tag})")
+        plt.title(f"file_tag Embedding UMAP Projection by {stratified_key} ({file_tag})")
         plt.xlabel("UMAP 1")
         plt.ylabel("UMAP 2")
         plt.legend(title=f"{stratified_key}", bbox_to_anchor=(1.05, 1), loc=2,
@@ -2387,7 +2393,7 @@ class TestAnalysis(unittest.TestCase):
             s=15,
             alpha=0.8
         )
-        plt.title(f"Movie Embedding t-SNE Projection by {stratified_key} ({file_tag})")
+        plt.title(f"file_tag Embedding t-SNE Projection by {stratified_key} ({file_tag})")
         plt.xlabel("t-SNE 1")
         plt.ylabel("t-SNE 2")
         plt.legend(title=f"{stratified_key}", bbox_to_anchor=(1.05, 1), loc=2,

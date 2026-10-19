@@ -57,11 +57,11 @@ or just compare:
 
 python3 src/test/python/movie_lens_retrieval/post_training_compare_models.py \
 --compare \
---INPUT_BASE_DIR_1="../TMP10/post_training_analysis" \
---INPUT_BASE_DIR_2="../TMP11/post_training_analysis" \
---TAG_1="high-t-model" \
---TAG_2="low-t-model" \
---OUTPUT_COMPARE_DIR="../TMP10_TMP11_Compare"
+--INPUT_BASE_DIR_1="../TMP42/post_training_analysis" \
+--INPUT_BASE_DIR_2="../TMP43/post_training_analysis" \
+--TAG_1="DNN[32,16]" \
+--TAG_2="DNN[64,32]" \
+--OUTPUT_COMPARE_DIR="../TMP42_TMP43_Compare"
 
 NOTE: nothing in here uses the src/test/resources/data embeddings or recommendations.
 '''
@@ -540,7 +540,7 @@ def _bootstrap_global_metrics(
         sig_str = "SIGNIFICANTLY " if is_sig else "Not significantly "
         extra = ""
         if metric_name == "Gini":
-            extra = "(lower means weaker predictive power and ability to rank)"
+            extra = "(lower means more equitable catalog exposure and less popularity bias)"
         elif metric_name == "Uniformity_Entropy":
             extra = "(higher means a more efficient use of latent space and has learned diverse, well-spread features)"
         conclusions.append(

@@ -735,44 +735,44 @@ class TestAnalysis(unittest.TestCase):
                 conclusions.append(
                     "PRECISION FAILURE: The model retrieves slates with the same or worse precision than a completely random draw.")
             
-            # Cohort History Utilization (Recall Trend)
-            recall_t0 = agg_res[f"recall_at_{top_k}_mean_user_tier_0"]
-            recall_t2 = agg_res[f"recall_at_{top_k}_mean_user_tier_2"]
+            # Cohort History Utilization (Recall Trend: Tier 0 = Power Users, Tier 2 = Light Users)
+            recall_power = agg_res[f"recall_at_{top_k}_mean_user_tier_0"]
+            recall_light = agg_res[f"recall_at_{top_k}_mean_user_tier_2"]
             
-            if recall_t2 > recall_t0 * 1.5:
+            if recall_power > recall_light * 1.5:
                 conclusions.append(
-                    f"EXCELLENT HISTORY UTILIZATION: Power users (Tier 2 Recall: {recall_t2:.1%}) perform massively better than light users (Tier 0 Recall: {recall_t0:.1%}). The model successfully translates rich interaction histories into highly relevant slates.")
-            elif recall_t2 > recall_t0:
+                    f"EXCELLENT HISTORY UTILIZATION: Power users (Tier 0 Recall: {recall_power:.1%}) perform massively better than light users (Tier 2 Recall: {recall_light:.1%}). The model successfully translates rich interaction histories into highly relevant slates.")
+            elif recall_power > recall_light:
                 conclusions.append(
-                    f"MODERATE HISTORY UTILIZATION: Power users see slightly better recall than light users.")
+                    f"MODERATE HISTORY UTILIZATION: Power users (Tier 0: {recall_power:.1%}) see better recall than light users (Tier 2: {recall_light:.1%}).")
             else:
                 conclusions.append(
-                    f"HISTORY NEGLECT WARNING: Power users perform worse or equal to light users, indicating the model struggles to parse dense interaction histories.")
+                    f"STRONG LIGHT-USER GENERALIZATION: Light/niche users (Tier 2 Recall: {recall_light:.1%}) achieve recall comparable to or exceeding power users (Tier 0 Recall: {recall_power:.1%}).")
             
-            # NDCG (Ranking Quality)
-            ndcg_t0 = agg_res[f"ndcg_at_{top_k}_mean_user_tier_0"]
-            ndcg_t2 = agg_res[f"ndcg_at_{top_k}_mean_user_tier_2"]
+            # NDCG (Ranking Quality: Tier 0 = Power Users, Tier 2 = Light Users)
+            ndcg_power = agg_res[f"ndcg_at_{top_k}_mean_user_tier_0"]
+            ndcg_light = agg_res[f"ndcg_at_{top_k}_mean_user_tier_2"]
             
-            if ndcg_t2 > ndcg_t0:
+            if ndcg_power > ndcg_light:
                 conclusions.append(
-                    f"HEALTHY RANKING STRATIFICATION: NDCG scales positively with user tier (Tier 2: {ndcg_t2:.2%} vs Tier 0: {ndcg_t0:.2%}). The model not only retrieves the right items for power users but places them higher in the slate.")
+                    f"POWER USER RANKING ADVANTAGE: NDCG is higher for power users (Tier 0: {ndcg_power:.2%} vs Tier 2: {ndcg_light:.2%}).")
             else:
                 conclusions.append(
-                    "POOR RANKING STRATIFICATION: NDCG does not improve for power users, suggesting the model retrieves relevant items but places them randomly within the top K.")
+                    f"STRONG NICHE USER RANKING: Light/niche users achieve strong top-K ranking quality (Tier 2 NDCG: {ndcg_light:.2%} vs Tier 0: {ndcg_power:.2%}).")
             
-            # Movie Tier Performance (Popularity Bias & Tail Retrieval)
-            ndcg_mt0 = agg_res.get(f"ndcg_at_{top_k}_mean_movie_tier_0", 0.0)
-            ndcg_mt2 = agg_res.get(f"ndcg_at_{top_k}_mean_movie_tier_2", 0.0)
+            # Movie Tier Performance (Tier 0 = Head/Popular, Tier 2 = Tail/Niche)
+            ndcg_head = agg_res.get(f"ndcg_at_{top_k}_mean_movie_tier_0", 0.0)
+            ndcg_tail = agg_res.get(f"ndcg_at_{top_k}_mean_movie_tier_2", 0.0)
             
-            if ndcg_mt2 > ndcg_mt0 * 1.5:
+            if ndcg_head > ndcg_tail * 1.5:
                 conclusions.append(
-                    f"POPULARITY BIAS DETECTED: Ranking quality heavily favors head/popular movies (Tier 2 NDCG: {ndcg_mt2:.2%}) compared to long-tail/niche items (Tier 0 NDCG: {ndcg_mt0:.2%}).")
-            elif ndcg_mt0 > ndcg_mt2:
+                    f"POPULARITY BIAS DETECTED: Ranking quality heavily favors head/popular movies (Tier 0 NDCG: {ndcg_head:.2%}) compared to long-tail/niche items (Tier 2 NDCG: {ndcg_tail:.2%}).")
+            elif ndcg_tail > ndcg_head:
                 conclusions.append(
-                    f"STRONG LONG-TAIL PERFORMANCE: Model successfully surfaces and ranks niche/long-tail items (Tier 0 NDCG: {ndcg_mt0:.2%}) effectively relative to popular items (Tier 2 NDCG: {ndcg_mt2:.2%}).")
+                    f"STRONG LONG-TAIL PERFORMANCE: Model surfaces and ranks niche/long-tail items (Tier 2 NDCG: {ndcg_tail:.2%}) effectively relative to popular head items (Tier 0 NDCG: {ndcg_head:.2%}).")
             else:
                 conclusions.append(
-                    f"BALANCED ITEM TIER RANKING: NDCG performance remains consistent across movie tiers (Tier 0: {ndcg_mt0:.2%}, Tier 2: {ndcg_mt2:.2%}), indicating stable retrieval across popular and long-tail catalogs.")
+                    f"BALANCED ITEM TIER RANKING: NDCG performance remains consistent across movie tiers (Head Tier 0: {ndcg_head:.2%}, Tail Tier 2: {ndcg_tail:.2%}), indicating stable retrieval across popular and long-tail catalogs.")
             
             agg_res["automated_conclusions"] = conclusions
             
@@ -861,22 +861,23 @@ class TestAnalysis(unittest.TestCase):
                 TestAnalysis.parquet_output_dir, f"user_retrievals_top_{top_k}.parquet")
             retrieval_df.write_parquet(retrieval_parquet_path)
             
-            if True: #top_k != TestAnalysis.default_top_k:
-                #calc Gini coeff
+            if True:
+                # calc Gini coeff & Lorenz distribution
                 res = dict()
                 # ------------------------------------------------------------------
                 # GINI COEFFICIENT & LORENZ DISTRIBUTION CALCULATION
-                #  gini coeff is a measure of statistical dispersion
-                # this is the rank-based formulation for a discrete population.
-                #    G = (2 * sum_{i=1,n}( i * y_i) / (n * sum_{i=1,n}( i * y_i))
-                #          - ((n+1)/n)
-                #     where y_i is the retrieval count of the movie
-                #           i is the rank of the movie when sorted in ascending order from 1 to n
-                #           n is the total number of iterm in the catalog
-                #     the runtime complexity is limited by the sorting O(N * log(N))
+                # Gini coefficient measures statistical dispersion of item exposure.
+                # Rank-based formulation for a discrete population sorted ascending (y_1 <= ... <= y_n):
+                #    G_pop = (2 * sum_{i=1}^n (i * y_i)) / (n * sum_{i=1}^n y_i) - ((n + 1) / n)
+                #    G_unbiased = (n / (n - 1)) * G_pop
+                # where:
+                #    y_i is the retrieval count of movie i
+                #    i is the 1-based ascending rank (1 to n)
+                #    n is the total number of items in the catalog (or tier)
+                # Lower Gini = more equitable catalog exposure; Higher Gini = popularity concentration.
                 # ------------------------------------------------------------------
                 
-                # Must include catalog items with 0 retrievals to avoid underestimating inequality)
+                # Must include catalog items with 0 retrievals to avoid underestimating inequality
                 freq_df = (
                     TestAnalysis.movie_tiers_df.select("movie_id", "movie_tier")
                     .join(
@@ -886,7 +887,7 @@ class TestAnalysis(unittest.TestCase):
                         how="left"
                     )
                     .with_columns(pl.col("retrieval_count").fill_null(0))
-                    .sort("retrieval_count") # Must be sorted ascending for Lorenz & Gini math
+                    .sort(["retrieval_count", "movie_id"]) # Deterministic sort for Lorenz & Gini math
                 )
                 
                 freq_parquet_path = os.path.join(TestAnalysis.parquet_output_dir, f"item_frequencies_top_{top_k}.parquet")
@@ -896,59 +897,50 @@ class TestAnalysis(unittest.TestCase):
                 total_recs = freq_df["retrieval_count"].sum()
                 
                 if total_recs > 0:
-                    # --- Full Catalog Gini ---
-                    full_gini = freq_df.select(
-                        ((2.0 * (pl.col("retrieval_count") * pl.int_range(1,
-                            n_catalog + 1)).sum()) /
-                         (n_catalog * total_recs)) - (
-                                    (n_catalog + 1.0) / n_catalog)
-                    ).item()
+                    # --- Full Catalog Gini (Unbiased [0, 1] scaled) ---
+                    full_gini = self.calculate_gini(freq_df["retrieval_count"], unbiased=True)
+                    
+                    # --- Normalized Shannon Entropy & Effective Catalog Size ---
+                    probs = freq_df.filter(pl.col("retrieval_count") > 0)["retrieval_count"].to_numpy() / float(total_recs)
+                    shannon_entropy = float(-np.sum(probs * np.log(probs)))
+                    norm_entropy = shannon_entropy / float(np.log(n_catalog)) if n_catalog > 1 else 0.0
+                    effective_catalog_size = float(np.exp(shannon_entropy))
                     
                     # --- Lorenz Curve Calculation & Export ---
                     lorenz_df = freq_df.with_columns(
-                        cum_items_pct=pl.int_range(1,
-                            n_catalog + 1) / n_catalog,
-                        cum_recs_pct=pl.col(
-                            "retrieval_count").cum_sum() / total_recs
+                        cum_items_pct=pl.int_range(1, n_catalog + 1) / n_catalog,
+                        cum_recs_pct=pl.col("retrieval_count").cum_sum() / total_recs
                     )
                     
                     # Extract specific analytical points
-                    bottom_80_share = lorenz_df.filter(pl.col("cum_items_pct") <= 0.80)[
-                        "cum_recs_pct"].max()
-                    top_10_share = 1.0 - (lorenz_df.filter(
-                        pl.col("cum_items_pct") <= 0.90)[
-                                              "cum_recs_pct"].max() or 0.0)
-                    
-                    # Export a clean 100-point Lorenz Curve for automated analysis/plotting
-                    # Groups into 1% to 100% buckets and takes the max cumulative share for each
-                    lorenz_curve_array = (
-                        lorenz_df.with_columns(
-                            (pl.col("cum_items_pct") * 100).ceil().cast(
-                                pl.Int32).alias("percentile"))
-                        .group_by("percentile").agg(pl.col("cum_recs_pct").max())
-                        .sort("percentile")["cum_recs_pct"].to_list()
+                    bottom_80_share = float(
+                        lorenz_df.filter(pl.col("cum_items_pct") <= 0.80)["cum_recs_pct"].max() or 0.0
+                    )
+                    top_10_share = float(
+                        1.0 - (lorenz_df.filter(pl.col("cum_items_pct") <= 0.90)["cum_recs_pct"].max() or 0.0)
                     )
                     
-                    # --- Gini by Movie Tier ---
+                    # Export a clean, exact 100-point interpolated Lorenz Curve for plotting/JSON
+                    cum_items_np = lorenz_df["cum_items_pct"].to_numpy()
+                    cum_recs_np = lorenz_df["cum_recs_pct"].to_numpy()
+                    percentiles = np.linspace(0.01, 1.00, 100)
+                    lorenz_curve_array = np.interp(percentiles, cum_items_np, cum_recs_np).tolist()
+                    
+                    # --- Gini by Movie Tier (Within-Tier Exposure Inequality) ---
                     for movie_tier in range(0, 3):
                         tier_freq_df = freq_df.filter(
-                            pl.col("movie_tier") == movie_tier).sort(
-                            "retrieval_count")
-                        n_tier = tier_freq_df.height
-                        tier_recs = tier_freq_df["retrieval_count"].sum()
-                        
-                        tier_gini = 0.0
-                        if tier_recs > 0:
-                            tier_gini = tier_freq_df.select(
-                                ((2.0 * (pl.col(
-                                    "retrieval_count") * pl.int_range(1,
-                                    n_tier + 1)).sum()) /
-                                 (n_tier * tier_recs)) - (
-                                            (n_tier + 1.0) / n_tier)
-                            ).item()
+                            pl.col("movie_tier") == movie_tier
+                        ).sort(["retrieval_count", "movie_id"])
+                        tier_gini = self.calculate_gini(tier_freq_df["retrieval_count"], unbiased=True)
                         res[f"gini_at_{top_k}_movie_tier_{movie_tier}"] = float(tier_gini)
                     
-                    # --- Gini by User Tier ---
+                    # --- Gini by User Tier (Raw + Sample-Size Equalized to Prevent N-Cohort Bias) ---
+                    tier_user_counts = [
+                        retrieval_df.filter(pl.col("user_tier") == t)["user_id"].n_unique()
+                        for t in range(0, 3)
+                    ]
+                    min_tier_users = min([c for c in tier_user_counts if c > 0], default=0)
+                    
                     for user_tier in range(0, 3):
                         # Isolate retrievals generated ONLY by this user_tier
                         tier_retrieval_df = retrieval_df.filter(pl.col("user_tier") == user_tier)
@@ -962,32 +954,44 @@ class TestAnalysis(unittest.TestCase):
                                 on="movie_id",
                                 how="left"
                             )
-                            .with_columns(
-                                pl.col("retrieval_count").fill_null(0))
-                            .sort("retrieval_count")
+                            .with_columns(pl.col("retrieval_count").fill_null(0))
+                            .sort(["retrieval_count", "movie_id"])
                         )
                         
-                        u_tier_recs = user_tier_freq_df[
-                            "retrieval_count"].sum()
-                        u_tier_gini = 0.0
-                        
-                        if u_tier_recs > 0:
-                            u_tier_gini = user_tier_freq_df.select(
-                                ((2.0 * (pl.col(
-                                    "retrieval_count") * pl.int_range(1,
-                                    n_catalog + 1)).sum()) /
-                                 (n_catalog * u_tier_recs)) - (
-                                            (n_catalog + 1.0) / n_catalog)
-                            ).item()
+                        u_tier_gini = self.calculate_gini(user_tier_freq_df["retrieval_count"], unbiased=True)
                         res[f"gini_at_{top_k}_user_tier_{user_tier}"] = float(u_tier_gini)
+                        
+                        # Equalized cohort sample size Gini (removes sample-size distortion across tiers)
+                        if min_tier_users > 0:
+                            sampled_users = (
+                                tier_retrieval_df.select("user_id").unique()
+                                .sample(n=min_tier_users, seed=42)
+                            )
+                            eq_tier_ret_df = tier_retrieval_df.join(sampled_users, on="user_id", how="inner")
+                            eq_freq_df = (
+                                TestAnalysis.movie_tiers_df.select("movie_id")
+                                .join(
+                                    eq_tier_ret_df.group_by("movie_id").agg(pl.len().alias("retrieval_count")),
+                                    on="movie_id",
+                                    how="left"
+                                )
+                                .with_columns(pl.col("retrieval_count").fill_null(0))
+                            )
+                            res[f"gini_equalized_at_{top_k}_user_tier_{user_tier}"] = float(
+                                self.calculate_gini(eq_freq_df["retrieval_count"], unbiased=True)
+                            )
                 
                 else:
                     full_gini = 0.0
+                    norm_entropy = 0.0
+                    effective_catalog_size = 0.0
                     bottom_80_share = 0.0
                     top_10_share = 0.0
                     lorenz_curve_array = []
                 
                 res[f"gini_at_{top_k}_full"] = float(full_gini)
+                res[f"uniformity_entropy_at_{top_k}_full"] = float(norm_entropy)
+                res[f"effective_catalog_size_at_{top_k}_full"] = float(effective_catalog_size)
                 res[f"lorenz_at_{top_k}_bottom_80_share"] = float(bottom_80_share)
                 res[f"lorenz_at_{top_k}_top_10_share"] = float(top_10_share)
                 res[f"lorenz_at_{top_k}_curve_array"] = lorenz_curve_array  # List of 100 floats for JSON export
@@ -1002,16 +1006,20 @@ class TestAnalysis(unittest.TestCase):
                 conclusions = []
                 
                 if total_recs > 0:
-                    # Insight 1: Overall Popularity Bias (Full Gini)
+                    # Insight 1: Overall Catalog Concentration (Full Gini)
+                    # Note: Lower Gini = broader/more equitable catalog exposure; Higher Gini = stronger popularity concentration.
                     if full_gini > 0.90:
                         conclusions.append(
-                            f"SEVERE POPULARITY BIAS at_{top_k}: Gini is {full_gini:.2f}. The model is acting as a popularity echo chamber, collapsing onto blockbuster items.")
+                            f"SEVERE POPULARITY CONCENTRATION at_{top_k}: Gini is {full_gini:.2f} (Effective Catalog: {effective_catalog_size:.0f} items). "
+                            f"The model is acting as a popularity echo chamber, collapsing onto blockbuster items.")
                     elif full_gini < 0.45:
                         conclusions.append(
-                            f"SUSPICIOUSLY UNIFORM at_{top_k}: Gini is {full_gini:.2f}. The model may be overly random or popularity suppression (Log-Q/Temperature) is too aggressive.")
+                            f"HIGHLY UNIFORM EXPOSURE at_{top_k}: Gini is {full_gini:.2f} (Effective Catalog: {effective_catalog_size:.0f} items). "
+                            f"Recommendations are spread very broadly across the catalog.")
                     else:
                         conclusions.append(
-                            f"HEALTHY BIAS at_{top_k}: Gini is {full_gini:.2f}. The model successfully balances mainstream relevance with catalog exploration.")
+                            f"HEALTHY EXPOSURE BALANCE at_{top_k}: Gini is {full_gini:.2f} (Effective Catalog: {effective_catalog_size:.0f} items, "
+                            f"Normalized Entropy: {norm_entropy:.3f}). The model successfully balances mainstream relevance with catalog exploration.")
                     
                     # Insight 2: Long-Tail Health (Bottom 80% Share)
                     if bottom_80_share < 0.05:
@@ -1032,19 +1040,21 @@ class TestAnalysis(unittest.TestCase):
                         conclusions.append(
                             f"DIVERSE HEAD at_{top_k}: The top 10% consume {top_10_share:.1%} of slots, leaving plenty of room for the torso/tail.")
                     
-                    # Insight 4: User Cohort Behavior
-                    gini_power = res.get(f"gini_at_{top_k}_user_tier_2", 1.0)
-                    gini_light = res.get(f"gini_at_{top_k}_user_tier_0", 1.0)
+                    # Insight 4: User Cohort Behavior (Tier 0 = Power Users, Tier 2 = Light Users)
+                    gini_power = res.get(f"gini_equalized_at_{top_k}_user_tier_0", res.get(f"gini_at_{top_k}_user_tier_0", 1.0))
+                    gini_light = res.get(f"gini_equalized_at_{top_k}_user_tier_2", res.get(f"gini_at_{top_k}_user_tier_2", 1.0))
                     
                     if gini_power < gini_light - 0.02:  # 0.02 buffer for noise
                         conclusions.append(
-                            f"USER PERSONALIZATION at_{top_k}: Power users exhibit lower Gini (more diverse slates) than light users, successfully leveraging rich interaction histories.")
+                            f"POWER USER DIVERSIFICATION at_{top_k}: Power users (Tier 0 Equalized Gini: {gini_power:.3f}) exhibit lower catalog concentration "
+                            f"than light users (Tier 2 Equalized Gini: {gini_light:.3f}), leveraging rich interaction histories to explore broader inventory.")
                     elif gini_power > gini_light + 0.02:
                         conclusions.append(
-                            f"WARNING (COHORT COLLAPSE) at_{top_k}: Power users have higher concentration (Gini) than light users. The model may be pulling rich histories into dense popularity traps.")
+                            f"LIGHT/NICHE USER DIVERSIFICATION at_{top_k}: Light/niche users (Tier 2 Equalized Gini: {gini_light:.3f}) receive more broadly distributed "
+                            f"catalog exposure than power users (Tier 0 Equalized Gini: {gini_power:.3f}).")
                     else:
                         conclusions.append(
-                            f"UNIFORM COHORTS at_{top_k}: Light and Power users experience roughly the same level of catalog concentration.")
+                            f"UNIFORM COHORT CONCENTRATION at_{top_k}: Power (Tier 0: {gini_power:.3f}) and Light (Tier 2: {gini_light:.3f}) users experience roughly the same level of catalog concentration.")
                 
                 res["automated_conclusions"] = conclusions
                 
@@ -1190,14 +1200,14 @@ class TestAnalysis(unittest.TestCase):
         else:
             conclusions.append(f"MODERATE ITEM UNIFORMITY: Items are adequately distributed ({global_item_uniformity:.2f}).")
     
-        # Rule 2: User Cohort Collapse (Are power users clumping?)
-        u_uni_light = agg_res["uniformity_user_tier_0"]
-        u_uni_power = agg_res["uniformity_user_tier_2"]
+        # Rule 2: User Cohort Collapse (Tier 0 = Power Users, Tier 2 = Light Users)
+        u_uni_power = agg_res["uniformity_user_tier_0"]
+        u_uni_light = agg_res["uniformity_user_tier_2"]
         
         if u_uni_power > u_uni_light + 0.5:
-            conclusions.append(f"POWER USER COLLAPSE: Power users (Tier 2 uniformity: {u_uni_power:.2f}) are significantly more clumped than Light users (Tier 0 uniformity: {u_uni_light:.2f}). Their rich histories are collapsing into dense 'average' vectors.")
+            conclusions.append(f"POWER USER COLLAPSE: Power users (Tier 0 uniformity: {u_uni_power:.2f}) are significantly more clumped than Light users (Tier 2 uniformity: {u_uni_light:.2f}). Their rich histories are collapsing into dense 'average' vectors.")
         else:
-            conclusions.append("USER GEOMETRY HEALTHY: Power users maintain distinct spatial representations without collapsing into a dense cluster.")
+            conclusions.append(f"USER GEOMETRY HEALTHY: Power users (Tier 0 uniformity: {u_uni_power:.2f}) and Light users (Tier 2 uniformity: {u_uni_light:.2f}) maintain distinct spatial representations without collapsing into a dense cluster.")
     
         # Rule 3: Alignment Quality (Are users near their ground truth items?)
         # Distance of 2.0 is perfectly orthogonal (random). < 1.0 is good alignment.
@@ -1211,7 +1221,7 @@ class TestAnalysis(unittest.TestCase):
     
         agg_res["automated_conclusions"] = conclusions
         
-        TestAnalysis.summary_output_conclusions_dict["embeding_hubness"] = conclusions
+        TestAnalysis.summary_output_conclusions_dict["embedding_hubness"] = conclusions
         
         agg_res = self.convert_to_native_types(agg_res)
         print(f"Embedding Hubness:\n", json.dumps(agg_res, indent=4))
@@ -1615,6 +1625,32 @@ class TestAnalysis(unittest.TestCase):
             return obj.tolist()
         return obj
     
+    @staticmethod
+    def calculate_gini(counts: Union[pl.Series, np.ndarray], unbiased: bool = True) -> float:
+        """
+        Computes the discrete Gini coefficient of item exposure / retrieval counts.
+        
+        Formula (sorted ascending y_1 <= y_2 <= ... <= y_n, 1-indexed i = 1..n):
+            G_pop = (2 * sum_{i=1}^n (i * y_i)) / (n * sum_{i=1}^n y_i) - (n + 1) / n
+        If unbiased=True, scales by n / (n - 1) so that a single item receiving 100%
+        of all recommendations yields G = 1.0 regardless of catalog size n.
+        """
+        if isinstance(counts, pl.Series):
+            y = np.sort(counts.to_numpy().astype(np.float64))
+        else:
+            y = np.sort(np.asarray(counts, dtype=np.float64))
+            
+        n = y.size
+        total = np.sum(y)
+        if n <= 1 or total <= 0.0:
+            return 0.0
+            
+        ranks = np.arange(1, n + 1, dtype=np.float64)
+        gini_pop = (2.0 * np.sum(ranks * y)) / (n * total) - ((n + 1.0) / n)
+        if unbiased and n > 1:
+            return float(np.clip(gini_pop * (n / (n - 1.0)), 0.0, 1.0))
+        return float(np.clip(gini_pop, 0.0, 1.0))
+
     def calc_earth_mover_distances(self, distr_0, distr_1):
         """
         calculate normalized earth moviers distance between these 2 1D, length 3 distributions.

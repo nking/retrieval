@@ -240,31 +240,33 @@ class TestAnalysis(unittest.TestCase):
         ## calc P(X|Y) : only calculating for Y=1 which are the positives.  for each positive train, val, test count
         ##                movie_tier and normalize, then calc EMDs
         for name in ["train", "val", "test"]:
-            #each ratings dataframe here has columns "user_id", "movie_id", "rating", "timestamp"
-            df = read_ratings_to_df(TestAnalysis.ratings_dict[f'{name}'])
-            # movie_tiers_df is a dataframe of the entire movie_catalog with columns movie_id, movie_tier where movie_tier=0,1 or 2
-            df = df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
-            movie_counts = [df.select(pl.col("movie_tier").eq(t).sum()).item() for t in range(3)]
-            movie_fracs = self.normalize(movie_counts).tolist()
-            res[f"P_X_{name}"] = movie_fracs
+            # Full ratings split (pos + neg)
+            full_df = read_ratings_to_df(TestAnalysis.ratings_dict[f'{name}'])
+            full_df = full_df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
+            full_movie_counts = [full_df.select(pl.col("movie_tier").eq(t).sum()).item() for t in range(3)]
+            full_movie_fracs = self.normalize(full_movie_counts).tolist()
+            res[f"P_X_{name}"] = full_movie_fracs
             
-            pos_movie_counts = [(df.select(pl.col("rating").ge(3) & pl.col("movie_tier").eq(t)).sum()).item() for t in range(3)]
+            # Ground-truth positive ratings split (Y=1)
+            df = read_ratings_to_df(TestAnalysis.ratings_dict[f'positive_{name}'])
+            df = df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
+            pos_movie_counts_by_tier = [df.select(pl.col("movie_tier").eq(t).sum()).item() for t in range(3)]
+            
+            # Conditional probability P(Y=1 | X=tier t) = #(Y=1, X=t) / #(X=t)
             hit_rates = [
                 p / m if m > 0 else 0.0
-                for p, m in zip(pos_movie_counts, movie_counts)
+                for p, m in zip(pos_movie_counts_by_tier, full_movie_counts)
             ]
+            res[f"P_Y_given_X_raw_{name}"] = hit_rates
             norm_hit_rates = self.normalize(hit_rates).tolist()
             res[f"P_Y|X_{name}"] = norm_hit_rates
             
-            pos_movie_counts = (df.select( pl.col("rating").ge(3) ).sum()).item()
-            ratings_counts = df.height
-            res[f"P_Y_{name}"] = pos_movie_counts / ratings_counts
+            # Prior P(Y=1) = total positives / total ratings
+            ratings_counts = max(1, full_df.height)
+            res[f"P_Y_{name}"] = float(df.height) / float(ratings_counts)
             
-            #P(X|Y=1) stratified by movie_tier
-            df = read_ratings_to_df(TestAnalysis.ratings_dict[f'positive_{name}'])
-            df = df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
-            
-            movie_counts = [df.select(pl.col("movie_tier").eq(t).sum()).item() for t in range(3)]
+            # P(X|Y=1) stratified by movie_tier
+            movie_counts = pos_movie_counts_by_tier
             movie_fracs = self.normalize(movie_counts).tolist()
             for movie_tier in (0, 1, 2):
                 res[f"movie_tier_{movie_tier}_{name}_counts"] = movie_counts[movie_tier]
@@ -363,7 +365,7 @@ class TestAnalysis(unittest.TestCase):
         cat_tr_emd = res[f'movie_tier_emd_catalog_to_train']
         if cat_tr_emd > 0.025:
             conclusions.append(
-                f"EXPECTED INTERACTION POPULARITY BIAS: Catalog vs. Train EMD is {cat_tr_emd:.4f}. Training interactions heavily concentrate on high-tier items relative to catalog availability."
+                f"EXPECTED INTERACTION POPULARITY BIAS: Catalog vs. Train EMD is {cat_tr_emd:.4f}. Training interactions heavily concentrate on popular head (Tier 0) items relative to catalog availability."
             )
         else:
             conclusions.append(
@@ -379,22 +381,26 @@ class TestAnalysis(unittest.TestCase):
         p_y_train_to_test = abs(res['P_Y_train'] - res['P_Y_test'])
         p_x_y_train_to_val = res[f'movie_tier_emd_train_to_val']
         p_x_y_train_to_test = res[f'movie_tier_emd_train_to_test']
-        tags = ["P_X", "P_Y|X", "P_Y", "P_X|Y"]
-        tvs = [p_x_train_to_val,  p_y_x_train_to_val,  p_y_train_to_val, p_x_y_train_to_val]
-        tts = [p_x_train_to_test, p_y_x_train_to_test, p_y_train_to_test, p_x_y_train_to_test]
-        for tag, tv, tt in zip(tags, tvs, tts):
+        
+        shift_specs = [
+            ("P(X) [Marginal Item Exposure]", p_x_train_to_val, p_x_train_to_test, "EMD"),
+            ("P(Y=1|X) [Conditional Hit-Rate Profile]", p_y_x_train_to_val, p_y_x_train_to_test, "EMD"),
+            ("P(Y=1) [Global Positive Rating Rate]", p_y_train_to_val, p_y_train_to_test, "AbsDiff"),
+            ("P(X|Y=1) [Positive Item Tier Distribution]", p_x_y_train_to_val, p_x_y_train_to_test, "EMD"),
+        ]
+        for label_desc, tv, tt, metric_unit in shift_specs:
             max_split_drift = max(tv, tt)
             if max_split_drift < 0.015:
                 conclusions.append(
-                    f"{tag} MOVIE TIER STABILITY EXCELLENT: Activity profile distribution remains consistent across splits (Train-Test EMD: {tt:.4f})."
+                    f"{label_desc} STABILITY EXCELLENT: Distribution remains consistent across splits (Train-Test {metric_unit}: {tt:.4f})."
                 )
             elif max_split_drift < 0.04:
                 conclusions.append(
-                    f"{tag} MOVIE TIER MODERATE DRIFT: Slight popularity shift across splits (Train-Test EMD: {tt:.4f})."
+                    f"{label_desc} MODERATE DRIFT: Mild temporal shift across splits (Train-Test {metric_unit}: {tt:.4f})."
                 )
             else:
                 conclusions.append(
-                    f"{tag} MOVIE TIER HIGH DRIFT WARNING: Significant item popularity shift between Train and Test splits (Train-Test EMD: {tt:.4f})."
+                    f"{label_desc} HIGH DRIFT WARNING: Significant shift between Train and Test splits (Train-Test {metric_unit}: {tt:.4f})."
                 )
         
         # covariate shift P(X)_changed * P(Y|X)_unchanged
@@ -638,8 +644,10 @@ class TestAnalysis(unittest.TestCase):
                     for tier in (0, 1, 2)
                 ],
                 *[
-                    (pl.col(f"hits_tier_{tier}") / float(top_k)).alias(
-                        f"precision_tier_{tier}")
+                    pl.when(pl.col(f"gt_pos_tier_{tier}") > 0)
+                    .then(pl.col(f"hits_tier_{tier}") / float(top_k))
+                    .otherwise(None)
+                    .alias(f"precision_tier_{tier}")
                     for tier in (0, 1, 2)
                 ],
                 
@@ -767,9 +775,12 @@ class TestAnalysis(unittest.TestCase):
             if ndcg_head > ndcg_tail * 1.5:
                 conclusions.append(
                     f"POPULARITY BIAS DETECTED: Ranking quality heavily favors head/popular movies (Tier 0 NDCG: {ndcg_head:.2%}) compared to long-tail/niche items (Tier 2 NDCG: {ndcg_tail:.2%}).")
-            elif ndcg_tail > ndcg_head:
+            elif ndcg_head > ndcg_tail * 1.15:
                 conclusions.append(
-                    f"STRONG LONG-TAIL PERFORMANCE: Model surfaces and ranks niche/long-tail items (Tier 2 NDCG: {ndcg_tail:.2%}) effectively relative to popular head items (Tier 0 NDCG: {ndcg_head:.2%}).")
+                    f"MODERATE HEAD FAVORITISM: Head movies rank higher (Tier 0 NDCG: {ndcg_head:.2%}) than long-tail items (Tier 2 NDCG: {ndcg_tail:.2%}), though tail items still receive meaningful top-{top_k} placement.")
+            elif ndcg_tail > ndcg_head * 1.05:
+                conclusions.append(
+                    f"STRONG LONG-TAIL PERFORMANCE: Model surfaces and ranks niche/long-tail items (Tier 2 NDCG: {ndcg_tail:.2%}) higher than popular head items (Tier 0 NDCG: {ndcg_head:.2%}).")
             else:
                 conclusions.append(
                     f"BALANCED ITEM TIER RANKING: NDCG performance remains consistent across movie tiers (Head Tier 0: {ndcg_head:.2%}, Tail Tier 2: {ndcg_tail:.2%}), indicating stable retrieval across popular and long-tail catalogs.")
@@ -870,10 +881,6 @@ class TestAnalysis(unittest.TestCase):
                 # Rank-based formulation for a discrete population sorted ascending (y_1 <= ... <= y_n):
                 #    G_pop = (2 * sum_{i=1}^n (i * y_i)) / (n * sum_{i=1}^n y_i) - ((n + 1) / n)
                 #    G_unbiased = (n / (n - 1)) * G_pop
-                # where:
-                #    y_i is the retrieval count of movie i
-                #    i is the 1-based ascending rank (1 to n)
-                #    n is the total number of items in the catalog (or tier)
                 # Lower Gini = more equitable catalog exposure; Higher Gini = popularity concentration.
                 # ------------------------------------------------------------------
                 
@@ -1007,7 +1014,6 @@ class TestAnalysis(unittest.TestCase):
                 
                 if total_recs > 0:
                     # Insight 1: Overall Catalog Concentration (Full Gini)
-                    # Note: Lower Gini = broader/more equitable catalog exposure; Higher Gini = stronger popularity concentration.
                     if full_gini > 0.90:
                         conclusions.append(
                             f"SEVERE POPULARITY CONCENTRATION at_{top_k}: Gini is {full_gini:.2f} (Effective Catalog: {effective_catalog_size:.0f} items). "
@@ -1128,62 +1134,167 @@ class TestAnalysis(unittest.TestCase):
             json.dump(agg_res, f, indent=4)
     
     def test_embedding_hubness(self):
-        
+        """
+        Evaluates Hypersphere Geometry (Wang & Isola Uniformity & Alignment) and
+        Intrinsic k-NN Hubness (Radovanovic et al. k-occurrence skewness & anti-hubs)
+        for both Movie (Candidate) and User (Query) embeddings.
+        Exports per-movie and per-user Parquet files for paired statistical comparison.
+        """
+        from scipy.stats import skew
         output_file_path = os.path.join(TestAnalysis.summary_output_dir, "embedding_hubness.json")
         
         agg_res = dict()
-        
-        # GLOBAL ITEM UNIFORMITY (Calculated Once) ---
-        # Evaluates how well the full catalog is distributed across the hypersphere.
-        # We extract this into a helper lambda since we'll reuse the exact math for users.
         t_param = 2.0
+        knn_k = 20
         
-        def calc_uniformity(embs_np):
+        def calc_uniformity_and_potentials(embs_np: np.ndarray) -> Tuple[float, np.ndarray]:
+            """
+            Computes global Wang & Isola log-uniformity and per-entity log radial potential:
+                u_i = log( (1 / (N - 1)) * sum_{j != i} exp(-t * ||x_i - x_j||^2) )
+            Lower (more negative) values indicate better spread across the unit hypersphere.
+            """
             n = embs_np.shape[0]
-            if n <= 1: return 0.0
-            # Since ||u|| = 1, dist^2 = 2 - 2*(u dot v)
-            dist_sq = 2.0 - 2.0 * np.dot(embs_np, embs_np.T)
-            # Uniformity is log expected value of exp(-t * dist^2)
-            # We subtract 'n' to remove the self-pair diagonals (where exp(0) = 1)
-            sum_off_diag = np.sum(np.exp(-t_param * dist_sq)) - n
-            return np.log(sum_off_diag / (n * (n - 1)))
+            if n <= 1:
+                return 0.0, np.zeros(n, dtype=np.float64)
+            sim_matrix = np.clip(np.dot(embs_np, embs_np.T), -1.0, 1.0)
+            dist_sq = np.maximum(0.0, 2.0 - 2.0 * sim_matrix)
+            kernel_mat = np.exp(-t_param * dist_sq)
+            np.fill_diagonal(kernel_mat, 0.0)
+            row_means = np.maximum(np.sum(kernel_mat, axis=1) / float(n - 1), 1e-12)
+            pointwise_log_potential = np.log(row_means)
+            global_uniformity = float(np.log(np.maximum(np.mean(row_means), 1e-12)))
+            return global_uniformity, pointwise_log_potential
+
+        def calc_knn_hubness(embs_np: np.ndarray, k: int = 20) -> Tuple[np.ndarray, float, float, int]:
+            """
+            Computes the intrinsic k-nearest neighbor occurrence count N_k(i) for each item
+            in the embedding space (excluding self), returning:
+                - k_occurrences: array of shape (N,) with N_k(i) counts
+                - skewness: standardized 3rd moment S_{N_k} (lower = less hubness concentration)
+                - antihub_pct: fraction of items with N_k(i) == 0 (orphaned items)
+                - max_hub_count: max_i N_k(i)
+            """
+            n = embs_np.shape[0]
+            if n <= k + 1:
+                return np.zeros(n, dtype=np.int32), 0.0, 0.0, 0
+            sim_matrix = np.dot(embs_np, embs_np.T)
+            np.fill_diagonal(sim_matrix, -np.inf)
+            # Top-k indices per row using argpartition in O(N^2)
+            top_k_indices = np.argpartition(sim_matrix, -k, axis=1)[:, -k:]
+            k_occurrences = np.bincount(top_k_indices.ravel(), minlength=n)
+            hub_skewness = float(skew(k_occurrences))
+            antihub_pct = float(np.mean(k_occurrences == 0))
+            max_hub_count = int(np.max(k_occurrences))
+            return k_occurrences, hub_skewness, antihub_pct, max_hub_count
+
+        # ------------------------------------------------------------------
+        # 1. MOVIE (CANDIDATE) EMBEDDING UNIFORMITY & INTRINSIC HUBNESS
+        # ------------------------------------------------------------------
+        movie_embs_np = TestAnalysis.movie_catalog_embeddings.numpy()
+        catalog_movie_ids_np = TestAnalysis.catalog_movie_ids.numpy().squeeze()
         
-        global_item_uniformity = calc_uniformity(TestAnalysis.movie_catalog_embeddings.numpy())
+        global_item_uniformity, movie_potentials = calc_uniformity_and_potentials(movie_embs_np)
+        movie_k_occ, item_hub_skew, item_antihub_pct, item_max_hub = calc_knn_hubness(movie_embs_np, k=knn_k)
         
-        agg_res[f"uniformity_global_item"] = global_item_uniformity
+        agg_res["uniformity_global_item"] = float(global_item_uniformity)
+        agg_res[f"hubness_item_k{knn_k}_skewness"] = float(item_hub_skew)
+        agg_res[f"hubness_item_k{knn_k}_antihub_pct"] = float(item_antihub_pct)
+        agg_res[f"hubness_item_k{knn_k}_max_count"] = int(item_max_hub)
         
-        #this is the test dataset of positive ratings
+        movie_Geo_df = pl.DataFrame({
+            "movie_id": catalog_movie_ids_np,
+            "movie_uniformity_potential": movie_potentials,
+            f"movie_knn_hubness_k{knn_k}": movie_k_occ
+        }).join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
+        
+        for m_tier in [0, 1, 2]:
+            tier_mask = (movie_Geo_df["movie_tier"] == m_tier).to_numpy()
+            if np.any(tier_mask):
+                tier_m_embs = movie_embs_np[tier_mask]
+                tier_m_uni, _ = calc_uniformity_and_potentials(tier_m_embs)
+                agg_res[f"uniformity_movie_tier_{m_tier}"] = float(tier_m_uni)
+                agg_res[f"movie_potential_mean_tier_{m_tier}"] = float(np.mean(movie_potentials[tier_mask]))
+                agg_res[f"hubness_item_k{knn_k}_mean_movie_tier_{m_tier}"] = float(np.mean(movie_k_occ[tier_mask]))
+            else:
+                agg_res[f"uniformity_movie_tier_{m_tier}"] = 0.0
+                agg_res[f"movie_potential_mean_tier_{m_tier}"] = 0.0
+                agg_res[f"hubness_item_k{knn_k}_mean_movie_tier_{m_tier}"] = 0.0
+
+        # ------------------------------------------------------------------
+        # 2. USER (QUERY) UNIFORMITY & POSITIVE PAIR ALIGNMENT (USER & MOVIE TIERS)
+        # ------------------------------------------------------------------
         pos_test_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
         pos_test_df = pos_test_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
-        #has "user_id", "movie_id", "rating", "timestamp", "user_tier"
+        pos_test_df = pos_test_df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
         
+        # Compute unique user embeddings once (using each user's first test timestamp)
+        # so multi-interaction power users don't inject duplicate self-vectors into Uniformity
+        uniq_u_ids_1d, uniq_ts_1d = get_user_and_first_timestamp_from_ratings(pos_test_df)
+        uniq_u_embs = self.create_user_embeddings_batch(
+            np.expand_dims(uniq_u_ids_1d, axis=1),
+            np.expand_dims(uniq_ts_1d, axis=1)
+        ).numpy()
+        
+        global_user_uniformity, user_potentials = calc_uniformity_and_potentials(uniq_u_embs)
+        agg_res["uniformity_global_user"] = float(global_user_uniformity)
+        
+        user_geo_df = pl.DataFrame({
+            "user_id": uniq_u_ids_1d,
+            "user_uniformity_potential": user_potentials
+        }).join(TestAnalysis.user_tiers_df, on="user_id", how="left")
+        
+        # Positive pair alignment across all positive test interactions
+        all_u_ids = np.expand_dims(pos_test_df["user_id"].to_numpy(), axis=1)
+        all_ts = np.expand_dims(pos_test_df["timestamp"].to_numpy(), axis=1)
+        all_m_ids = pos_test_df["movie_id"].to_numpy()
+        
+        all_u_np = self.create_user_embeddings_batch(all_u_ids, all_ts).numpy()
+        all_m_np = movie_embs_np[all_m_ids - TestAnalysis.MOVIE_OFFSET]
+        pos_align_dists = np.maximum(0.0, 2.0 - 2.0 * np.sum(all_u_np * all_m_np, axis=1))
+        
+        pos_align_df = pos_test_df.with_columns(
+            pl.Series("pos_alignment_dist_sq", pos_align_dists)
+        )
+        agg_res["alignment_global"] = float(np.mean(pos_align_dists))
+        
+        # Per-user tier Uniformity and Alignment
         for user_tier in [0, 1, 2]:
+            # Deduplicated user uniformity for this user_tier
+            u_tier_mask = (user_geo_df["user_tier"] == user_tier).to_numpy()
+            if np.any(u_tier_mask):
+                tier_u_uni, _ = calc_uniformity_and_potentials(uniq_u_embs[u_tier_mask])
+            else:
+                tier_u_uni = 0.0
             
-            #  Isolate the ground-truth positive pairs for this tier
-            tier_pos_df = pos_test_df.filter(pl.col("user_tier") == user_tier)
+            # Positive alignment for this user_tier
+            tier_align_series = pos_align_df.filter(pl.col("user_tier") == user_tier)["pos_alignment_dist_sq"]
+            tier_alignment = float(tier_align_series.mean()) if tier_align_series.len() > 0 else 0.0
             
-            user_ids = np.expand_dims(tier_pos_df["user_id"].to_numpy(), axis=1)
-            timestamps = np.expand_dims(tier_pos_df["timestamp"].to_numpy(), axis=1)
-            pos_movie_ids = tier_pos_df["movie_id"].to_numpy()  # 1D array for indexing
+            agg_res[f"uniformity_user_tier_{user_tier}"] = float(tier_u_uni)
+            agg_res[f"alignment_user_tier_{user_tier}"] = float(tier_alignment)
             
-            # Generate User Embeddings for these specific rows
-            user_embeddings = self.create_user_embeddings_batch(user_ids, timestamps)
-            u_np = user_embeddings.numpy()  # Shape: (N, emb_dim)
-            
-            # Fast Lookup of corresponding Movie Embeddings
-            # (Assuming your TestAnalysis.movie_catalog_embeddings index perfectly matches movie_id)
-            m_np = TestAnalysis.movie_catalog_embeddings.numpy()[pos_movie_ids - TestAnalysis.MOVIE_OFFSET]  # Shape: (N, emb_dim)
-            
-            # 5User Uniformity
-            tier_user_uniformity = calc_uniformity(u_np)
-            
-            # Row-wise Dot Product for exact positive pair alignment
-            # Element-wise multiply -> Sum across the embedding dimension
-            pos_dot_products = np.sum(u_np * m_np, axis=1)
-            tier_alignment = np.mean(2.0 - 2.0 * pos_dot_products)
-            
-            agg_res[f'uniformity_user_tier_{user_tier}'] = float(tier_user_uniformity)
-            agg_res[f'alignment_user_tier_{user_tier}'] = float(tier_alignment)
+        # Per-movie tier Positive Alignment
+        for movie_tier in [0, 1, 2]:
+            m_tier_align_series = pos_align_df.filter(pl.col("movie_tier") == movie_tier)["pos_alignment_dist_sq"]
+            m_tier_alignment = float(m_tier_align_series.mean()) if m_tier_align_series.len() > 0 else 0.0
+            agg_res[f"alignment_movie_tier_{movie_tier}"] = float(m_tier_alignment)
+
+        # Export per-user and per-movie hubness/geometry Parquet files for paired testing
+        per_user_align_df = pos_align_df.group_by("user_id").agg(
+            pl.col("pos_alignment_dist_sq").mean().alias("user_pos_alignment")
+        )
+        user_geo_df = user_geo_df.join(per_user_align_df, on="user_id", how="left")
+        user_geo_df.write_parquet(
+            os.path.join(TestAnalysis.parquet_output_dir, "user_embedding_hubness.parquet")
+        )
+        
+        per_movie_align_df = pos_align_df.group_by("movie_id").agg(
+            pl.col("pos_alignment_dist_sq").mean().alias("movie_pos_alignment")
+        )
+        movie_Geo_df = movie_Geo_df.join(per_movie_align_df, on="movie_id", how="left")
+        movie_Geo_df.write_parquet(
+            os.path.join(TestAnalysis.parquet_output_dir, "movie_embedding_hubness.parquet")
+        )
 
         # ------------------------------------------------------------------
         # RULE-BASED CONCLUSIONS
@@ -1191,33 +1302,64 @@ class TestAnalysis(unittest.TestCase):
         conclusions = []
         
         # Rule 1: Global Item Uniformity (Are items collapsed?)
-        # Healthy distributions typically score between -1.5 and -3.5.
-        # Closer to 0 means severe collapse.
         if global_item_uniformity > -1.0:
             conclusions.append(f"ITEM COLLAPSE WARNING: Global Item Uniformity is high ({global_item_uniformity:.2f}). The movie catalog is densely clumped together, likely leading to low diversity.")
         elif global_item_uniformity < -2.5:
             conclusions.append(f"HEALTHY ITEM DISPERSION: Global Item Uniformity is excellent ({global_item_uniformity:.2f}). Movies are well-distributed across the hypersphere.")
         else:
             conclusions.append(f"MODERATE ITEM UNIFORMITY: Items are adequately distributed ({global_item_uniformity:.2f}).")
+            
+        # Rule 2: Intrinsic Movie Hubness Skewness (k-NN Hubness)
+        if item_hub_skew > 2.0:
+            conclusions.append(
+                f"HIGH MOVIE HUBNESS WARNING: k-NN occurrence skewness is {item_hub_skew:.2f} (Anti-hubs: {item_antihub_pct:.1%}, Max Hub: {item_max_hub}). "
+                f"A small set of hub movies dominates nearest-neighbor structure."
+            )
+        else:
+            conclusions.append(
+                f"LOW MOVIE HUBNESS: k-NN occurrence skewness is well-controlled ({item_hub_skew:.2f}, Anti-hubs: {item_antihub_pct:.1%})."
+            )
     
-        # Rule 2: User Cohort Collapse (Tier 0 = Power Users, Tier 2 = Light Users)
+        # Rule 3: Global & Cohort User Uniformity (Tier 0 = Power Users, Tier 2 = Light Users)
         u_uni_power = agg_res["uniformity_user_tier_0"]
         u_uni_light = agg_res["uniformity_user_tier_2"]
         
-        if u_uni_power > u_uni_light + 0.5:
-            conclusions.append(f"POWER USER COLLAPSE: Power users (Tier 0 uniformity: {u_uni_power:.2f}) are significantly more clumped than Light users (Tier 2 uniformity: {u_uni_light:.2f}). Their rich histories are collapsing into dense 'average' vectors.")
+        if global_user_uniformity > -2.0:
+            conclusions.append(
+                f"USER MANIFOLD COLLAPSE WARNING: Global User Uniformity is high ({global_user_uniformity:.2f}). "
+                f"User query vectors are clumping into restricted islands on the hypersphere."
+            )
+        elif u_uni_power > u_uni_light + 0.35:
+            conclusions.append(
+                f"POWER USER COLLAPSE: Power users (Tier 0 uniformity: {u_uni_power:.2f}) are significantly more clumped than "
+                f"Light users (Tier 2 uniformity: {u_uni_light:.2f}). Their rich histories are collapsing into dense 'average' vectors."
+            )
         else:
-            conclusions.append(f"USER GEOMETRY HEALTHY: Power users (Tier 0 uniformity: {u_uni_power:.2f}) and Light users (Tier 2 uniformity: {u_uni_light:.2f}) maintain distinct spatial representations without collapsing into a dense cluster.")
+            conclusions.append(
+                f"USER GEOMETRY HEALTHY: Global User Uniformity ({global_user_uniformity:.2f}), Power users (Tier 0: {u_uni_power:.2f}), "
+                f"and Light users (Tier 2: {u_uni_light:.2f}) are well-spread across the hypersphere without island collapse."
+            )
     
-        # Rule 3: Alignment Quality (Are users near their ground truth items?)
-        # Distance of 2.0 is perfectly orthogonal (random). < 1.0 is good alignment.
+        # Rule 4: Alignment Quality (Squared Euclidean distance 2 - 2*<u, m>; 2.0 = orthogonal/random, 0.0 = identical)
+        # Note: Because a single static user vector must align with multiple diverse ground-truth movies simultaneously,
+        # healthy multi-interest alignment typically sits around 1.25 - 1.65 (cosine similarity ~0.18 - 0.38).
         avg_alignment = np.mean([agg_res[f"alignment_user_tier_{i}"] for i in range(3)])
-        if avg_alignment > 1.5:
-            conclusions.append(f"POOR ALIGNMENT: Average positive pair distance is {avg_alignment:.2f} (Max is 4.0). User embeddings are struggling to map closely to their interacted items.")
-        elif avg_alignment < 0.5:
-            conclusions.append(f"OVERFIT WARNING: Average positive pair distance is {avg_alignment:.2f}. Alignment is extremely tight, which may indicate the model is memorizing exact pairs rather than generalizing.")
+        if avg_alignment > 1.65:
+            conclusions.append(
+                f"WEAK ALIGNMENT WARNING: Average positive pair squared distance is {avg_alignment:.2f} (Orthogonal/Random is 2.0, Max is 4.0). "
+                f"User embeddings are struggling to align with their ground-truth test items."
+            )
+        elif avg_alignment < 0.70:
+            conclusions.append(
+                f"OVERFIT / NARROW CONE WARNING: Average positive pair squared distance is {avg_alignment:.2f}. "
+                f"Alignment is unusually tight, which may indicate memorization of narrow item cliques."
+            )
         else:
-            conclusions.append(f"HEALTHY ALIGNMENT: Average positive pair distance is {avg_alignment:.2f}. Model balances proximity to positive items while maintaining generalization space.")
+            conclusions.append(
+                f"HEALTHY MULTI-INTEREST ALIGNMENT: Average positive pair squared distance is {avg_alignment:.2f} "
+                f"(Tier 0: {agg_res['alignment_user_tier_0']:.2f}, Tier 1: {agg_res['alignment_user_tier_1']:.2f}, Tier 2: {agg_res['alignment_user_tier_2']:.2f}). "
+                f"Model balances proximity to positive items across multiple user interests."
+            )
     
         agg_res["automated_conclusions"] = conclusions
         
@@ -1259,11 +1401,8 @@ class TestAnalysis(unittest.TestCase):
         shutil.rmtree(outdir, ignore_errors=True)
         os.makedirs(outdir, exist_ok=True)
         
-        #plotting using all ratings, bT)
+        # Use positive_test users and their first test interaction timestamp (consistent with all other evaluation tests)
         pos_ratings_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
-        pos_ratings_df = pos_ratings_df.join(TestAnalysis.train_history_df,
-            on="user_id", how="left")
-        
         user_ids0, timestamps = get_user_and_first_timestamp_from_ratings(pos_ratings_df)
         user_ids = np.expand_dims(user_ids0, axis=1)
         timestamps = np.expand_dims(timestamps, axis=1)
@@ -1296,6 +1435,7 @@ class TestAnalysis(unittest.TestCase):
             TestAnalysis.ratings_dict["positive_test"])
         pos_test_df = pos_test_df.join(TestAnalysis.user_tiers_df,
             on="user_id", how="left")
+        np.random.seed(42)
         (user_ids,
             timestamps) = get_random_user_and_first_timestamp_from_ratings(
             pos_test_df, n_samples)
@@ -1331,6 +1471,7 @@ class TestAnalysis(unittest.TestCase):
         stratification_key = "user_tier"
         stratification_values: List = [0, 1, 2]
         
+        np.random.seed(42)
         tier_dict: Dict[int, tuple[
             np.ndarray, np.ndarray]] = get_stratified_user_and_first_timestamp_from_ratings(
             ratings_df=pos_test_df,
@@ -1379,6 +1520,7 @@ class TestAnalysis(unittest.TestCase):
         
         num_catalog_movies += len(new_movie_ids)
 
+        np.random.seed(42)
         (cs_user_ids,
             cs_timestamps) = get_random_user_and_first_timestamp_from_ratings(
             pos_test_df, n_samples)
@@ -1758,18 +1900,24 @@ class TestAnalysis(unittest.TestCase):
         conclusions = []
         if amplification_ratio > 1.15:
             conclusions.append(
-                f"[HIGH POPULARITY BIAS]: Model amplifies popularity by {amplification_ratio:.2f}x. "
+                f"[HIGH POPULARITY BIAS]: Model amplifies popularity by {amplification_ratio:.2f}x (Delta LogPop: {delta_pop:+.2f}). "
                 f"Retrieved slates (LogPop: {mean_retr_pop:.2f}) are significantly more popular "
                 f"than the users' natural test consumption (LogPop: {mean_gt_pop:.2f})."
             )
+        elif amplification_ratio < 0.55 or delta_pop < -3.0:
+            conclusions.append(
+                f"[AGGRESSIVE POPULARITY SUPPRESSION]: Model suppresses popularity to {amplification_ratio:.2f}x (Delta LogPop: {delta_pop:+.2f}). "
+                f"Retrieved slates (LogPop: {mean_retr_pop:.2f}) push heavily into obscure items relative to natural consumption ({mean_gt_pop:.2f})."
+            )
         elif amplification_ratio < 0.85:
             conclusions.append(
-                f"[NICHE BIAS]: Model suppresses popularity by {amplification_ratio:.2f}x. "
-                f"Retrieved slates are pushing much more obscure items than the user normally consumes."
+                f"[LOG-Q TAIL EXPLORATION]: Retrieved top-{top_k} slates reach deeper into torso/tail inventory "
+                f"(LogPop: {mean_retr_pop:.2f}, Ratio: {amplification_ratio:.2f}x, Delta: {delta_pop:+.2f}) than historical test positives ({mean_gt_pop:.2f}), "
+                f"counteracting training popularity bias."
             )
         else:
             conclusions.append(
-                f"[NEUTRAL POPULARITY]: Model preserves user consumption habits (Ratio: {amplification_ratio:.2f}x). "
+                f"[NEUTRAL POPULARITY]: Model preserves user consumption habits (Ratio: {amplification_ratio:.2f}x, Delta LogPop: {delta_pop:+.2f}). "
                 f"Retrieved item popularity aligns closely with ground truth behavior."
             )
             
@@ -2094,8 +2242,9 @@ class TestAnalysis(unittest.TestCase):
         
         original_inputs = TestAnalysis.movie_data.get_movie(original_movie_ids)
         new_inputs = original_inputs.copy()
-        #replace IDs with the OOV 0
-        new_inputs["movie_id"] = tf.constant(zeroes)
+        # Use new_movie_ids (> max catalog movie_id) so MovieModel clips them to the untrained OOV slot (n_movies - 1),
+        # rather than 0 which clips to index 0 (movie_id = MOVIE_OFFSET = 6041)
+        new_inputs["movie_id"] = tf.constant(new_movie_ids, dtype=tf.int64)
         
         # original_embeddings : tf.Tensor = _create_movie_embeddings_batch(original_inputs)
         new_embeddings: tf.Tensor = _create_movie_embeddings_batch(new_inputs)
@@ -2405,7 +2554,7 @@ class TestAnalysis(unittest.TestCase):
             s=15,
             alpha=0.8
         )
-        plt.title(f"file_tag Embedding UMAP Projection by {stratified_key} ({file_tag})")
+        plt.title(f"Embedding UMAP Projection by {stratified_key} ({file_tag})")
         plt.xlabel("UMAP 1")
         plt.ylabel("UMAP 2")
         plt.legend(title=f"{stratified_key}", bbox_to_anchor=(1.05, 1), loc=2,
@@ -2429,7 +2578,7 @@ class TestAnalysis(unittest.TestCase):
             s=15,
             alpha=0.8
         )
-        plt.title(f"file_tag Embedding t-SNE Projection by {stratified_key} ({file_tag})")
+        plt.title(f"Embedding t-SNE Projection by {stratified_key} ({file_tag})")
         plt.xlabel("t-SNE 1")
         plt.ylabel("t-SNE 2")
         plt.legend(title=f"{stratified_key}", bbox_to_anchor=(1.05, 1), loc=2,

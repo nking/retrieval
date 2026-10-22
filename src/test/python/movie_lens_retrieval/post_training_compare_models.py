@@ -734,11 +734,22 @@ def _compare_embedding_hubness_summary(
         a1 = np.array([float(d1[k]) for k in u_align_keys])
         a2 = np.array([float(d2[k]) for k in u_align_keys])
         mean_a_diff = float(np.mean(a1 - a2))
+        m_uni_1 = float(d1.get("uniformity_global_item", 0.0))
+        m_uni_2 = float(d2.get("uniformity_global_item", 0.0))
+        ild_1 = float(d1.get("ild_movie", 0.0))
+        ild_2 = float(d2.get("ild_movie", 0.0))
         if np.all(a1 > a2):
-            conclusions.append(
-                f"[!] POSITIVE ALIGNMENT DEGRADATION: {tag_1} has larger (worse) positive-pair distance across ALL 3 user tiers "
-                f"(mean shift: {mean_a_diff:+.4f}), explaining lower retrieval Recall/NDCG."
-            )
+            if (m_uni_1 < m_uni_2) and (ild_1 > ild_2):
+                conclusions.append(
+                    f"[*] MULTI-INTEREST DISPERSION SHIFT: {tag_1} has a {mean_a_diff:+.4f} larger positive-pair squared distance across user tiers "
+                    f"because its movie catalog is spread more broadly across the hypersphere (Movie Uniformity {m_uni_1:.4f} vs {m_uni_2:.4f}, "
+                    f"ILD {ild_1:.4f} vs {ild_2:.4f}); verify that Recall@100 and NDCG@100 are preserved."
+                )
+            else:
+                conclusions.append(
+                    f"[!] POSITIVE ALIGNMENT DEGRADATION: {tag_1} has larger (worse) positive-pair distance across ALL 3 user tiers "
+                    f"(mean shift: {mean_a_diff:+.4f}), indicating weaker user-to-item alignment."
+                )
         elif np.all(a1 < a2):
             conclusions.append(
                 f"[*] POSITIVE ALIGNMENT WIN: {tag_1} achieves tighter (better) positive-pair alignment across ALL 3 user tiers "

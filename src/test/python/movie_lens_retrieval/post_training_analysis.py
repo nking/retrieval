@@ -1374,50 +1374,44 @@ class TestAnalysis(unittest.TestCase):
         with open(output_file_path, "w") as f:
             json.dump(agg_res, f, indent=4)
     
-    def test_plot_tsne_umap_movie_embeddings(self):
-        
-        outdir = os.path.join(TestAnalysis.summary_output_dir, "movie_embedding_plots")
+    def test_plot_tsne_umap_embeddings(self):
+        outdir = os.path.join(TestAnalysis.summary_output_dir, "embedding_plots")
         shutil.rmtree(outdir, ignore_errors=True)
         os.makedirs(outdir, exist_ok=True)
-       
-        #emb_movies_df = pl.DataFrame(
+        
+        # emb_movies_df = pl.DataFrame(
         #    [(m_id, emb) for m_id, emb in zip(TestAnalysis.catalog_movie_ids.numpy().squeeze(), TestAnalysis.movie_catalog_embeddings.numpy())],
         #    schema=["movie_id", "embedding"],
         #    orient="row"
-        #)
+        # )
         emb_movies_df = pl.DataFrame({
             "movie_id": TestAnalysis.catalog_movie_ids.numpy().squeeze(),
             "embedding": TestAnalysis.movie_catalog_embeddings.numpy()
         })
-        emb_movies_df = emb_movies_df.join(TestAnalysis.movie_tiers_df, on="movie_id", how="left")
-        
-        self.plot_embeddings_umap_tsne(emb_movies_df, outdir, "all_movies",
-            stratified_key="movie_tier")
-    
-    def test_plot_tsne_umap_user_embeddings(self):
-        
-        outdir = os.path.join(TestAnalysis.summary_output_dir,
-            "user_embedding_plots")
-        shutil.rmtree(outdir, ignore_errors=True)
-        os.makedirs(outdir, exist_ok=True)
+        emb_movies_df = emb_movies_df.join(TestAnalysis.movie_tiers_df,
+            on="movie_id", how="left")
         
         # Use positive_test users and their first test interaction timestamp (consistent with all other evaluation tests)
-        pos_ratings_df = read_ratings_to_df(TestAnalysis.ratings_dict["positive_test"])
-        user_ids0, timestamps = get_user_and_first_timestamp_from_ratings(pos_ratings_df)
+        pos_ratings_df = read_ratings_to_df(
+            TestAnalysis.ratings_dict["positive_test"])
+        user_ids0, timestamps = get_user_and_first_timestamp_from_ratings(
+            pos_ratings_df)
         user_ids = np.expand_dims(user_ids0, axis=1)
         timestamps = np.expand_dims(timestamps, axis=1)
-        user_embeddings : tf.Tensor = self.create_user_embeddings_batch(user_ids, timestamps)
-        
-        emb_df = pl.DataFrame({
+        user_embeddings: tf.Tensor = self.create_user_embeddings_batch(user_ids, timestamps)
+        emb_users_df = pl.DataFrame({
             "user_id": user_ids0,
             "embedding": user_embeddings.numpy()
         })
+        emb_users_df = emb_users_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
         
-        emb_df = emb_df.join(TestAnalysis.user_tiers_df, on="user_id", how="left")
+        files_written = _create_umap_tsne_plots(
+            emb_users_df,
+            emb_movies_df,
+            outdir,
+            "tower_embed")
         
-        self.plot_embeddings_umap_tsne(emb_df, outdir, "all_users",
-            stratified_key="user_tier")
-    
+
     def test_inter_list_diversity(self):
         
         output_file_path = os.path.join(TestAnalysis.summary_output_dir,
@@ -2531,63 +2525,6 @@ class TestAnalysis(unittest.TestCase):
     
     def join_df_to_movie_tiers(self, df: pl.DataFrame) -> pl.DataFrame:
         return df.join(TestAnalysis.movie_tiers_df, on='movie_id', how='left')
-        
-    def plot_embeddings_umap_tsne(self, joined_df, outdir: str, file_tag: str,
-        stratified_key: str = "tier"):
-        
-        # Convert to NumPy arrays for UMAP
-        X = np.array(joined_df.get_column("embedding").to_list())
-        y = joined_df.get_column(stratified_key).to_numpy()
-        
-        print(f'length of {file_tag} is {len(X)}')
-        
-        # Apply UMAP and plot
-        reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42, n_jobs=1)
-        embedding_2d = reducer.fit_transform(X)
-        
-        plt.figure(figsize=(10, 8))
-        sns.scatterplot(
-            x=embedding_2d[:, 0],
-            y=embedding_2d[:, 1],
-            hue=y,
-            palette="tab10",
-            s=15,
-            alpha=0.8
-        )
-        plt.title(f"Embedding UMAP Projection by {stratified_key} ({file_tag})")
-        plt.xlabel("UMAP 1")
-        plt.ylabel("UMAP 2")
-        plt.legend(title=f"{stratified_key}", bbox_to_anchor=(1.05, 1), loc=2,
-            borderaxespad=0.)
-        plt.tight_layout()
-        plt.savefig(os.path.join(outdir, f"umap_{file_tag}_{stratified_key}.png"),
-            dpi=300, bbox_inches="tight")
-        # plt.show()
-        plt.close()
-        
-        # t-SNE plot
-        reducer_tsne = TSNE(n_components=2, random_state=42, perplexity=30)
-        embedding_tsne = reducer_tsne.fit_transform(X)
-        
-        plt.figure(figsize=(10, 8))
-        sns.scatterplot(
-            x=embedding_tsne[:, 0],
-            y=embedding_tsne[:, 1],
-            hue=y,
-            palette="tab10",
-            s=15,
-            alpha=0.8
-        )
-        plt.title(f"Embedding t-SNE Projection by {stratified_key} ({file_tag})")
-        plt.xlabel("t-SNE 1")
-        plt.ylabel("t-SNE 2")
-        plt.legend(title=f"{stratified_key}", bbox_to_anchor=(1.05, 1), loc=2,
-            borderaxespad=0.)
-        plt.tight_layout()
-        plt.savefig(os.path.join(outdir, f"tsne_{file_tag}_{stratified_key}.png"),
-            dpi=300, bbox_inches="tight")
-        # plt.show()
-        plt.close()
 
     def get_positive_ratings_history(self) -> pl.DataFrame:
         r = []
@@ -2700,6 +2637,288 @@ def _create_movie_embeddings_batch(inputs: Dict) -> tf.Tensor:
         genres=inputs['genres'])
     embeddings_list = embeddings_list[output_keyword]
     return embeddings_list
+
+
+def _create_umap_tsne_plots(
+    user_repr_df: pl.DataFrame,
+    movie_repr_df: pl.DataFrame,
+    output_dir: str,
+    output_filename_root: str,
+) -> Dict[str, str]:
+    """
+    Generates 6 diagnostic projection plots (3 UMAP + 3 t-SNE) for deduplicated,
+    L2-normalized user and movie representation vectors:
+      1. User embeddings stratified by `user_tier` (t-SNE & UMAP)
+      2. Movie embeddings stratified by `movie_tier` (t-SNE & UMAP)
+      3. Joint User + Movie embeddings co-projected in the SAME shared hypersphere
+         (t-SNE & UMAP with `metric="cosine"`), stratified by entity type and tier.
+
+    Args:
+        user_repr_df: Polars DataFrame with columns `["user_id", "embedding", "user_tier"]`
+        movie_repr_df: Polars DataFrame with columns `["movie_id", "embedding", "movie_tier"]`
+        output_dir: Directory path where PNG files will be saved.
+        output_filename_root: Prefix/root string for saved PNG filenames.
+
+    Returns:
+        Dictionary mapping plot keys to saved file paths.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    saved_paths: Dict[str, str] = {}
+
+    # Extract and ensure unit L2 normalization on both representation matrices
+    X_users = np.asarray(user_repr_df.get_column("embedding").to_list(), dtype=np.float32)
+    X_users = X_users / np.maximum(np.linalg.norm(X_users, axis=1, keepdims=True), 1e-12)
+    y_users = user_repr_df.get_column("user_tier").fill_null(-1).to_numpy()
+
+    X_movies = np.asarray(movie_repr_df.get_column("embedding").to_list(), dtype=np.float32)
+    X_movies = X_movies / np.maximum(np.linalg.norm(X_movies, axis=1, keepdims=True), 1e-12)
+    y_movies = movie_repr_df.get_column("movie_tier").fill_null(-1).to_numpy()
+
+    def _plot_single_modality(
+        X: np.ndarray,
+        tiers: np.ndarray,
+        entity_label: str,
+        tier_col_name: str,
+        file_suffix: str,
+    ):
+        # 1. UMAP (metric='cosine' for geodesic angular distance on unit hypersphere)
+        reducer_umap = umap.UMAP(
+            n_neighbors=15, min_dist=0.1, metric="cosine", random_state=42, n_jobs=1
+        )
+        emb_umap = reducer_umap.fit_transform(X)
+
+        plt.figure(figsize=(10, 8))
+        sns.scatterplot(
+            x=emb_umap[:, 0],
+            y=emb_umap[:, 1],
+            hue=tiers,
+            palette="tab10",
+            s=15,
+            alpha=0.8,
+        )
+        plt.title(
+            f"{output_filename_root}: {entity_label} Embedding UMAP by {tier_col_name} (N={len(X)})"
+        )
+        plt.xlabel("UMAP 1")
+        plt.ylabel("UMAP 2")
+        plt.legend(
+            title=tier_col_name, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.0
+        )
+        plt.tight_layout()
+        umap_path = os.path.join(
+            output_dir, f"{output_filename_root}_umap_{file_suffix}.png"
+        )
+        plt.savefig(umap_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        saved_paths[f"umap_{file_suffix}"] = umap_path
+
+        # 2. t-SNE (metric='cosine' for unit hypersphere)
+        reducer_tsne = TSNE(
+            n_components=2,
+            perplexity=min(30, max(5, len(X) - 1)),
+            metric="cosine",
+            init="pca",
+            learning_rate="auto",
+            random_state=42,
+        )
+        emb_tsne = reducer_tsne.fit_transform(X)
+
+        plt.figure(figsize=(10, 8))
+        sns.scatterplot(
+            x=emb_tsne[:, 0],
+            y=emb_tsne[:, 1],
+            hue=tiers,
+            palette="tab10",
+            s=15,
+            alpha=0.8,
+        )
+        plt.title(
+            f"{output_filename_root}: {entity_label} Embedding t-SNE by {tier_col_name} (N={len(X)})"
+        )
+        plt.xlabel("t-SNE 1")
+        plt.ylabel("t-SNE 2")
+        plt.legend(
+            title=tier_col_name, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.0
+        )
+        plt.tight_layout()
+        tsne_path = os.path.join(
+            output_dir, f"{output_filename_root}_tsne_{file_suffix}.png"
+        )
+        plt.savefig(tsne_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        saved_paths[f"tsne_{file_suffix}"] = tsne_path
+
+    # --- 1. User Embeddings (Stratified by user_tier) ---
+    _plot_single_modality(
+        X=X_users,
+        tiers=y_users,
+        entity_label="User",
+        tier_col_name="user_tier",
+        file_suffix="users_user_tier",
+    )
+
+    # --- 2. Movie Embeddings (Stratified by movie_tier) ---
+    _plot_single_modality(
+        X=X_movies,
+        tiers=y_movies,
+        entity_label="Movie",
+        tier_col_name="movie_tier",
+        file_suffix="movies_movie_tier",
+    )
+
+    # --- 2b. Save Movie UMAP reducer & coords so we can project Users directly onto the Movie manifold ---
+    reducer_movie_umap = umap.UMAP(
+        n_neighbors=15, min_dist=0.1, metric="cosine", random_state=42, n_jobs=1
+    )
+    coords_movies_only_umap = reducer_movie_umap.fit_transform(X_movies)
+    # Transform Users strictly via User -> Movie cosine k-NN edges (eliminates User-User k-NN core/ring artifact!)
+    coords_users_on_movies_umap = reducer_movie_umap.transform(X_users)
+    coords_bipartite_umap = np.vstack([coords_users_on_movies_umap, coords_movies_only_umap])
+
+    # --- 3. Joint User + Movie Shared Hypersphere Projections ---
+    # Compute quantitative Cross-Modality Overlap vs Modality Gap diagnostics on S^(d-1):
+    u_centroid = np.mean(X_users, axis=0)
+    m_centroid = np.mean(X_movies, axis=0)
+    modality_gap_l2 = float(np.linalg.norm(u_centroid - m_centroid))
+    cross_sim_matrix = X_users @ X_movies.T
+    user_top1_movie_sim = float(np.mean(np.max(cross_sim_matrix, axis=1)))
+    user_top15_movie_sim = float(
+        np.mean(np.partition(cross_sim_matrix, -15, axis=1)[:, -15:])
+    )
+    print(
+        f"[{output_filename_root} Cross-Modality Geometry] "
+        f"Modality Centroid Gap ||u_bar - m_bar||_2 = {modality_gap_l2:.4f} | "
+        f"Mean User->Top1 Movie Cosine Sim = {user_top1_movie_sim:.4f} | "
+        f"Mean User->Top15 Movie Cosine Sim = {user_top15_movie_sim:.4f}"
+    )
+
+    n_u = len(X_users)
+    X_joint = np.vstack([X_users, X_movies])
+
+    # Also build Modality-Centered unit vectors (Liang et al., NeurIPS 2022) to remove global cone offset
+    X_users_centered = X_users - u_centroid
+    X_users_centered /= np.maximum(np.linalg.norm(X_users_centered, axis=1, keepdims=True), 1e-12)
+    X_movies_centered = X_movies - m_centroid
+    X_movies_centered /= np.maximum(np.linalg.norm(X_movies_centered, axis=1, keepdims=True), 1e-12)
+    X_joint_centered = np.vstack([X_users_centered, X_movies_centered])
+
+    joint_palette = {
+        "User Tier 0 (Power)": "#1f77b4",   # Deep Blue
+        "User Tier 1 (Mid)": "#6baed6",     # Sky Blue
+        "User Tier 2 (Light)": "#9ecae1",   # Light Blue
+        "Movie Tier 0 (Head)": "#d62728",   # Crimson Red
+        "Movie Tier 1 (Torso)": "#ff7f0e",  # Bright Orange
+        "Movie Tier 2 (Tail)": "#2ca02c",   # Forest Green
+    }
+    user_label_map = {
+        0: "User Tier 0 (Power)",
+        1: "User Tier 1 (Mid)",
+        2: "User Tier 2 (Light)",
+    }
+    movie_label_map = {
+        0: "Movie Tier 0 (Head)",
+        1: "Movie Tier 1 (Torso)",
+        2: "Movie Tier 2 (Tail)",
+    }
+    u_labels = [user_label_map.get(int(t), f"User Tier {t}") for t in y_users]
+    m_labels = [movie_label_map.get(int(t), f"Movie Tier {t}") for t in y_movies]
+
+    def _render_joint_figure(
+        coords_2d: np.ndarray,
+        method_name: str,
+        file_tag: str,
+        subtitle_note: str = "",
+    ):
+        plt.figure(figsize=(11, 8.5))
+        # Plot Users first as a subtle background layer (circles)
+        for u_tier_str in ["User Tier 0 (Power)", "User Tier 1 (Mid)", "User Tier 2 (Light)"]:
+            mask = np.array([lbl == u_tier_str for lbl in u_labels])
+            if np.any(mask):
+                plt.scatter(
+                    coords_2d[:n_u][mask, 0],
+                    coords_2d[:n_u][mask, 1],
+                    c=joint_palette.get(u_tier_str, "#1f77b4"),
+                    label=u_tier_str,
+                    marker="o",
+                    s=12,
+                    alpha=0.40,
+                    edgecolors="none",
+                )
+        # Plot Movies on top with distinct triangle markers so item tiers stand out clearly
+        for m_tier_str in ["Movie Tier 1 (Torso)", "Movie Tier 2 (Tail)", "Movie Tier 0 (Head)"]:
+            mask = np.array([lbl == m_tier_str for lbl in m_labels])
+            if np.any(mask):
+                plt.scatter(
+                    coords_2d[n_u:][mask, 0],
+                    coords_2d[n_u:][mask, 1],
+                    c=joint_palette.get(m_tier_str, "#ff7f0e"),
+                    label=m_tier_str,
+                    marker="^",
+                    s=18,
+                    alpha=0.80,
+                    edgecolors="none",
+                )
+        extra_str = f" [{subtitle_note}]" if subtitle_note else ""
+        plt.title(
+            f"{output_filename_root}: Joint User & Movie {method_name}{extra_str} "
+            f"(Users={len(X_users)}, Movies={len(X_movies)}, Top1 Sim={user_top1_movie_sim:.2f}, Gap={modality_gap_l2:.2f})"
+        )
+        plt.xlabel(f"{method_name} 1")
+        plt.ylabel(f"{method_name} 2")
+        plt.legend(
+            title="Entity & Tier",
+            bbox_to_anchor=(1.05, 1),
+            loc=2,
+            borderaxespad=0.0,
+        )
+        plt.tight_layout()
+        out_path = os.path.join(
+            output_dir, f"{output_filename_root}_{file_tag}_joint_users_movies.png"
+        )
+        plt.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        saved_paths[f"{file_tag}_joint_users_movies"] = out_path
+
+    # 3a. Bipartite Catalog-Anchored UMAP: Users projected onto Movie UMAP via User->Movie cosine k-NN
+    #     (Eliminates the User-User vs Movie-Movie k-NN ring artifact!)
+    _render_joint_figure(
+        coords_bipartite_umap,
+        "UMAP",
+        "umap_catalog_anchored",
+        subtitle_note="Users Projected onto Movie Manifold via Cross-Edges",
+    )
+
+    # 3b. Raw Stacked Joint UMAP (shows raw uncentered modality cones + intra-modality k-NN)
+    reducer_joint_umap = umap.UMAP(
+        n_neighbors=15, min_dist=0.1, metric="cosine", random_state=42, n_jobs=1
+    )
+    coords_joint_umap = reducer_joint_umap.fit_transform(X_joint)
+    _render_joint_figure(
+        coords_joint_umap,
+        "UMAP",
+        "umap",
+        subtitle_note="Raw Stacked k-NN",
+    )
+
+    # 3c. Modality-Centered Joint t-SNE (removes constant centroid offset u_bar - m_bar)
+    reducer_joint_tsne = TSNE(
+        n_components=2,
+        perplexity=min(30, max(5, len(X_joint_centered) - 1)),
+        metric="cosine",
+        init="pca",
+        learning_rate="auto",
+        random_state=42,
+    )
+    coords_joint_tsne = reducer_joint_tsne.fit_transform(X_joint_centered)
+    _render_joint_figure(
+        coords_joint_tsne,
+        "t-SNE",
+        "tsne",
+        subtitle_note="Modality-Centered Cosine t-SNE",
+    )
+
+    return saved_paths
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -130,7 +130,8 @@ class TestAnalysis(unittest.TestCase):
         cls.MOVIE_OFFSET: int = cls.model_dict['n_users']
         embed_dim = json.loads(cls.model_dict['layer_sizes'])[-1]
         cls.user_id_range_incl = [1, cls.model_dict['n_users']]
-        cls.movie_id_range_incl = [cls.MOVIE_OFFSET+1, 1+ cls.MOVIE_OFFSET + cls.model_dict['n_movies']]
+        #[6040+1, 6040+n_movies]=[6041,9923]
+        cls.movie_id_range_incl = [cls.MOVIE_OFFSET+1, cls.MOVIE_OFFSET + cls.model_dict['n_movies']]
         
         cls.ratings_dict = {
             "full_history" : [
@@ -1502,6 +1503,7 @@ class TestAnalysis(unittest.TestCase):
             )
             agg_res = agg_res | res
         
+        #TODO: consider updating this to be consistent with the ranker project's manner of analyzing cold starts
         # ===== cold start movies ====================
         (new_movie_ids, new_movie_embeddings) = self.get_cold_start_movies(
             pos_test_df)
@@ -1698,13 +1700,16 @@ class TestAnalysis(unittest.TestCase):
         
         id0 = TestAnalysis.movie_id_range_incl[-1] + 1
         new_movie_ids = np.array([i for i in range(id0, id0 + len(original_movie_ids))])
-        
+        #when offset is subtracted, these will be 0s for the OOV embedding slot
+        zeroes =  np.zeros(new_movie_ids, dtype=np.int64) + TestAnalysis.MOVIE_OFFSET
+       
         original_movie_ids = np.expand_dims(original_movie_ids, axis=1)
         new_movie_ids = np.expand_dims(new_movie_ids, axis=1)
+        zeroes = np.expand_dims(zeroes, axis=1)
         
         original_inputs = TestAnalysis.movie_data.get_movie(original_movie_ids)
         new_inputs = original_inputs.copy()
-        new_inputs["movie_id"] = tf.constant(new_movie_ids)
+        new_inputs["movie_id"] = zeroes #tf.constant(new_movie_ids)
         
         #original_embeddings : tf.Tensor = _create_movie_embeddings_batch(original_inputs)
         new_embeddings : tf.Tensor = _create_movie_embeddings_batch(new_inputs)
@@ -2228,7 +2233,8 @@ class TestAnalysis(unittest.TestCase):
         new_movie_ids = np.array([i for i in range(id0, id0 + len(original_movie_ids))])
         
         n_movie_ids = len(new_movie_ids)
-        zeroes = np.zeros(n_movie_ids, dtype=np.int64)
+        # when offset is subtracted, these will be 0s for the OOV embedding slot
+        zeroes = np.zeros(n_movie_ids, dtype=np.int64) + TestAnalysis.MOVIE_OFFSET
         
         original_movie_ids = np.expand_dims(original_movie_ids, axis=1)
         new_movie_ids = np.expand_dims(new_movie_ids, axis=1)
@@ -2238,7 +2244,7 @@ class TestAnalysis(unittest.TestCase):
         new_inputs = original_inputs.copy()
         # Use new_movie_ids (> max catalog movie_id) so MovieModel clips them to the untrained OOV slot (n_movies - 1),
         # rather than 0 which clips to index 0 (movie_id = MOVIE_OFFSET = 6041)
-        new_inputs["movie_id"] = tf.constant(new_movie_ids, dtype=tf.int64)
+        new_inputs["movie_id"] = zeroes #tf.constant(new_movie_ids, dtype=tf.int64)
         
         # original_embeddings : tf.Tensor = _create_movie_embeddings_batch(original_inputs)
         new_embeddings: tf.Tensor = _create_movie_embeddings_batch(new_inputs)

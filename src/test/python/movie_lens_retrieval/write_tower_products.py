@@ -131,6 +131,7 @@ class WriteTowerProducts(unittest.TestCase):
                 f"Invalid 'layer_sizes' format in hyperparameters: {e}")
         
         cls.user_id_range_incl = [1, cls.model_dict['n_users']]
+        ##[6040+1, 6040+n_movies]=[6041,9923]
         cls.movie_id_range_incl = [cls.MOVIE_OFFSET +1,
             1+cls.MOVIE_OFFSET + cls.model_dict['n_movies']]
         cls.recommender_systems_git_hash = cls.model_dict.get("git_hash",

@@ -780,11 +780,11 @@ def _bootstrap_global_metrics(
     freq_path_1 = os.path.join(dir_1, f"item_frequencies_top_{top_k}.parquet")
     if os.path.exists(freq_path_1):
         catalog_df = pl.read_parquet(freq_path_1).select("movie_id")
-        movie_offset = int(catalog_df["movie_id"].min())
+        movie_offset = int(catalog_df["movie_id"].min())-1 #so that subtracting gives first id = 1
         num_catalog_movies = catalog_df.height
     else:
         # Fallback if item_frequencies is missing (MovieLens 1M: 6040 users + 1)
-        movie_offset = 6041
+        movie_offset = 6040
         num_catalog_movies = int(num_catalog_movies)
 
     # Shift movie_id back to 0-based catalog indices [0, num_catalog_movies - 1]

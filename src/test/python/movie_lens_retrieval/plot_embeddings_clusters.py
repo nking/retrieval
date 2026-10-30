@@ -29,7 +29,7 @@ class PlotEmbeddingsClusters(unittest.TestCase):
         self.movie_emb = os.path.join(get_project_dir(),
             "src/test/resources/data/movie_emb_inp/*tfrecord*.gz")
         self.n_movies = 3883
-        self.MOVIE_OFFSET = 6040 + 1
+        self.MOVIE_OFFSET = 6040
         
         _ct = "GZIP" if self.movie_emb.endswith(".gz") else None
         file_paths = glob.glob(self.movie_emb)

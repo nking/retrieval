@@ -6,7 +6,7 @@ import polars as pl
 from numpy import ndarray as ndarray
 
 class MovieData(object):
-    def __init__(self, movie_path:str, offset:int=6041):
+    def __init__(self, movie_path:str, offset:int=6040):
         """
         given path to movie file, creates a datastructure for movie_id access
         
@@ -22,6 +22,7 @@ class MovieData(object):
         self.offset = tf.constant(offset, dtype=tf.int64)
         df = pl.read_parquet(movie_path)
         
+        # min movie_id is 1, os below, subtract (offset - 1) or add an empty row at index 0 to title, genres
         df = df.sort('movie_id')
         self.title = tf.constant(df['title'].to_numpy(), name='movie_title', dtype=tf.string)
         self.genres = tf.constant(df['genres'].to_numpy(), name='movie_genres', dtype=tf.string)
@@ -44,7 +45,7 @@ class MovieData(object):
         if len(tf.shape(movie_id)) == 1:
             movie_id = tf.expand_dims(movie_id, 1)
             
-        idx = tf.subtract(movie_id, self.offset)
+        idx = tf.subtract(movie_id, self.offset + 1) # the min_movie_id - offset is index 1 so subtract one more
         return {
             'movie_id': movie_id,
             'genres': tf.gather(self.genres, idx)

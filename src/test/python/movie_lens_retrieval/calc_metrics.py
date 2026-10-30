@@ -85,7 +85,7 @@ class CalcMetrics(unittest.TestCase):
                 "src/test/resources/data/ratings_val.array_record")
             ]
         self.n_movies = 3883
-        self.MOVIE_OFFSET = 6040 + 1
+        self.MOVIE_OFFSET = 6040
         
     def _construct_Retrieval(self) -> Retriever:
         return Retriever(user_movie_saved_model_dir=self.user_movie_models_dir,

@@ -32,7 +32,7 @@ class TestRetrieval(unittest.TestCase):
                 "src/test/resources/data/ratings_val.array_record")
             ]
         self.max_k = 10
-        self.MOVIE_OFFSET = 6040 + 1
+        self.MOVIE_OFFSET = 6040
         
     def test_read_cold_start_movies(self):
         cold_start_movie_list = Retriever._read_cold_start(self.cold_start_path)

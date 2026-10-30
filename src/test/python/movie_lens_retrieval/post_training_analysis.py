@@ -127,10 +127,10 @@ class TestAnalysis(unittest.TestCase):
         cls.movies_path = os.path.join(test_res_dir, "movies/movies.parquet")
         
         cls.model_dict = read_model_assets_hparams(saved_model_dir)
-        cls.MOVIE_OFFSET: int = cls.model_dict['n_users'] + 1
+        cls.MOVIE_OFFSET: int = cls.model_dict['n_users']
         embed_dim = json.loads(cls.model_dict['layer_sizes'])[-1]
         cls.user_id_range_incl = [1, cls.model_dict['n_users']]
-        cls.movie_id_range_incl = [cls.MOVIE_OFFSET, cls.MOVIE_OFFSET + cls.model_dict['n_movies']]
+        cls.movie_id_range_incl = [cls.MOVIE_OFFSET+1, 1+ cls.MOVIE_OFFSET + cls.model_dict['n_movies']]
         
         cls.ratings_dict = {
             "full_history" : [

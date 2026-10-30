@@ -21,6 +21,7 @@ class UserData(object):
             
         df = pl.read_parquet(users_path)
         
+        #min user_id is 1 so below subtract 1 to get righ index
         df = df.sort('user_id')
         self.gender = tf.constant(df['gender'].to_numpy(), name='user_gender', dtype=tf.string)
         self.age = tf.constant(df['age'].to_numpy(), name='user_age', dtype=tf.int64)

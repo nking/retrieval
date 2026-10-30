@@ -123,7 +123,7 @@ class WriteTowerProducts(unittest.TestCase):
         except Exception as e:
             raise RuntimeError(f"Failed to read model hyperparameters: {e}")
         
-        cls.MOVIE_OFFSET: int = cls.model_dict['n_users'] + 1
+        cls.MOVIE_OFFSET: int = cls.model_dict['n_users']
         try:
             embed_dim = json.loads(cls.model_dict['layer_sizes'])[-1]
         except (KeyError, IndexError, json.JSONDecodeError) as e:
@@ -131,8 +131,8 @@ class WriteTowerProducts(unittest.TestCase):
                 f"Invalid 'layer_sizes' format in hyperparameters: {e}")
         
         cls.user_id_range_incl = [1, cls.model_dict['n_users']]
-        cls.movie_id_range_incl = [cls.MOVIE_OFFSET,
-            cls.MOVIE_OFFSET + cls.model_dict['n_movies']]
+        cls.movie_id_range_incl = [cls.MOVIE_OFFSET +1,
+            1+cls.MOVIE_OFFSET + cls.model_dict['n_movies']]
         cls.recommender_systems_git_hash = cls.model_dict.get("git_hash",
             "unknown")
         
@@ -201,7 +201,7 @@ class WriteTowerProducts(unittest.TestCase):
                 raise ValueError(
                     "Movie catalog embeddings tensor is empty. Cannot build searcher.")
             
-            MOVIE_OFFSET = int(tf.shape(catalog_user_ids)[0]) + 1
+            MOVIE_OFFSET = int(tf.shape(catalog_user_ids)[0])
             ann_searcher = self.build_searcher(movie_catalog_embeddings, n_search, normalize=False)
             
             neighbors, distances = self.search_batch(ann_searcher, user_catalog_embeddings, n_search)

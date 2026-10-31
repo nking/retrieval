@@ -21,6 +21,22 @@ class UserData(object):
             
         df = pl.read_parquet(users_path)
         
+        padding_row = pl.DataFrame({
+            "user_id": [0],
+            "gender": ["M"],
+            "age": [1],
+            "occupation": [0],
+            "zipcode": ["00000"]
+        }, schema={
+                "user_id": pl.Int64,
+                "gender": pl.String,
+                "age": pl.Int64,
+                "occupation": pl.Int64,
+                "zipcode": pl.String,
+            }
+        )
+        df = pl.concat([padding_row, df])
+        
         #min user_id is 1 so below subtract 1 to get righ index
         df = df.sort('user_id')
         self.gender = tf.constant(df['gender'].to_numpy(), name='user_gender', dtype=tf.string)
@@ -50,7 +66,7 @@ class UserData(object):
         if len(tf.shape(timestamp)) == 1:
             timestamp = tf.expand_dims(timestamp, 1)
             
-        idx = user_id - tf.constant(1, dtype=tf.int64)
+        idx = user_id
         now = tf.cast(tf.timestamp(), tf.int64)
         resolved_ts = tf.where(
             tf.equal(timestamp, -1), now, timestamp

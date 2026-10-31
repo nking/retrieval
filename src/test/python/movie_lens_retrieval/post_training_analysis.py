@@ -11,13 +11,13 @@ from pathlib import Path
 '''
 example usage from CLI:
 
-export PIPELINE_DATA_DIR="../TMP10/bin/rs_pipeline"
-export OUTPUT_BASE_DIR="../TMP10"
+export PIPELINE_DATA_DIR="../kaggle_reco_sys/TMP62/bin/rs_pipeline"
+export OUTPUT_BASE_DIR=""../kaggle_reco_sys/TMP62
 python3 -m unittest src.test.python.movie_lens_retrieval.post_training_analysis.TestAnalysis
 
 or
-PIPELINE_DATA_DIR="../TMP10/bin/rs_pipeline" \
-OUTPUT_BASE_DIR="../TMP10" \
+PIPELINE_DATA_DIR="../kaggle_reco_sys/TMP62/bin/rs_pipeline" \
+OUTPUT_BASE_DIR="../kaggle_reco_sys/TMP62" \
 python3 -m unittest src.test.python.movie_lens_retrieval.post_training_analysis.TestAnalysis
 
 metrics calculated:
@@ -485,7 +485,8 @@ class TestAnalysis(unittest.TestCase):
             neighbors, distances = TestAnalysis.search_batch(indexer=TestAnalysis.movie_catalog_emb_indexer,
                 queries=user_embeddings, final_num_neighbors=top_k)
                 
-            neighbors += TestAnalysis.MOVIE_OFFSET
+            #catalog is 0 based, but index=0 corresponds to movie_offset+1
+            neighbors += TestAnalysis.MOVIE_OFFSET + 1
             
             retrieval_df = pl.DataFrame({
                 "user_id": user_ids.squeeze(),
@@ -833,7 +834,8 @@ class TestAnalysis(unittest.TestCase):
             neighbors, distances = TestAnalysis.search_batch(indexer=indexer,
                 queries=user_embeddings, final_num_neighbors=top_k)
             
-            neighbors += TestAnalysis.MOVIE_OFFSET
+            # catalog is 0 based, but index=0 corresponds to movie_offset+1
+            neighbors += TestAnalysis.MOVIE_OFFSET + 1
             
             retrieval_df = pl.DataFrame({
                 "user_id": user_ids.squeeze(),
@@ -1109,7 +1111,8 @@ class TestAnalysis(unittest.TestCase):
             neighbors, distances = TestAnalysis.search_batch(indexer=TestAnalysis.movie_catalog_emb_indexer,
                 queries=user_embeddings, final_num_neighbors=TestAnalysis.default_top_k)
             #chk = full_movie_ids[neighbors]
-            neighbors += TestAnalysis.MOVIE_OFFSET
+            # catalog is 0 based, but index=0 corresponds to movie_offset+1
+            neighbors += TestAnalysis.MOVIE_OFFSET + 1
             #are_equal = np.array_equal(chk, neighbors)
             
             tier_ground_truth_df = pos_test_df.filter(pl.col(stratification_key)==tier)
@@ -1250,7 +1253,7 @@ class TestAnalysis(unittest.TestCase):
         all_m_ids = pos_test_df["movie_id"].to_numpy()
         
         all_u_np = self.create_user_embeddings_batch(all_u_ids, all_ts).numpy()
-        all_m_np = movie_embs_np[all_m_ids - TestAnalysis.MOVIE_OFFSET]
+        all_m_np = movie_embs_np[all_m_ids - TestAnalysis.MOVIE_OFFSET - 1]
         pos_align_dists = np.maximum(0.0, 2.0 - 2.0 * np.sum(all_u_np * all_m_np, axis=1))
         
         pos_align_df = pos_test_df.with_columns(
@@ -1698,10 +1701,11 @@ class TestAnalysis(unittest.TestCase):
         timestamps = first_interactions_df["timestamp"].to_numpy()
         timestamps = np.expand_dims(timestamps, axis=1)
         
+        n_movie_ids = len(original_movie_ids)
         id0 = TestAnalysis.movie_id_range_incl[-1] + 1
-        new_movie_ids = np.array([i for i in range(id0, id0 + len(original_movie_ids))])
+        new_movie_ids = np.array([i for i in range(id0, id0 + n_movie_ids)])
         #when offset is subtracted, these will be 0s for the OOV embedding slot
-        zeroes =  np.zeros(new_movie_ids, dtype=np.int64) + TestAnalysis.MOVIE_OFFSET
+        zeroes =  np.zeros(n_movie_ids, dtype=np.int64) + TestAnalysis.MOVIE_OFFSET
        
         original_movie_ids = np.expand_dims(original_movie_ids, axis=1)
         new_movie_ids = np.expand_dims(new_movie_ids, axis=1)
@@ -1720,8 +1724,9 @@ class TestAnalysis(unittest.TestCase):
         #for each new_movie_ids, replace with embedding for new_movie_ids.
         #this not only subtracts the old and inserts the new, but gives them the same index so that they
         # are findable when compared to the ground truth ratings.
+        #orig movie id range [offset + 1, offset + n_movies] = [6040+1, 6040+3883] = [6041, 9423]
         for i, m_id in enumerate(original_movie_ids):
-            idx = m_id[0] - TestAnalysis.MOVIE_OFFSET
+            idx = m_id[0] - TestAnalysis.MOVIE_OFFSET - 1
             assert(TestAnalysis.catalog_movie_ids[idx].numpy().item() == m_id[0])
             full_movie_embeddings[idx] = new_embeddings[i]
             
@@ -2397,7 +2402,8 @@ class TestAnalysis(unittest.TestCase):
         
         user_ids = user_ids.squeeze()
         
-        adjusted_neighbors = neighbors + movie_offset  # shape: (325, top_k)
+        # catalog is 0 based, but index=0 corresponds to movie_offset+1
+        adjusted_neighbors = neighbors + movie_offset + 1 # shape: (325, top_k)
         
         # Map catalog movie_id -> tier for checking retrieved candidate distribution
         catalog_tier_map = dict(

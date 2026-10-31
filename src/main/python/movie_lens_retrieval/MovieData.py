@@ -9,6 +9,8 @@ class MovieData(object):
     def __init__(self, movie_path:str, offset:int=6040):
         """
         given path to movie file, creates a datastructure for movie_id access
+        # the implicit indices are the movie_ids - the offset,
+        # so the file given must have all movie_ids present
         
         NOTE: request to CandidateModel use 64 bit integers for ids
         but that movie embeddings get written to files using 32 bit integers
@@ -21,9 +23,25 @@ class MovieData(object):
             print(f'WARNING: expecting input file to be a parquet file')
         self.offset = tf.constant(offset, dtype=tf.int64)
         df = pl.read_parquet(movie_path)
+        print(f"min movie_id={df['movie_id'].min()}, max movie_id={df['movie_id'].max()}")
+        assert (df['movie_id'].min() - offset == 1,
+            "expecting min of movie_id-offset = 1")
         
-        # min movie_id is 1, os below, subtract (offset - 1) or add an empty row at index 0 to title, genres
+        padding_row = pl.DataFrame({
+            "movie_id" : [0],
+            "title": ["A"],
+            "genres": ["Documentary"]
+        },
+            schema={
+                "movie_id": pl.Int64,
+                "title": pl.String,
+                "genres": pl.String
+            }
+        )
+        df = pl.concat([padding_row, df])
+        
         df = df.sort('movie_id')
+        
         self.title = tf.constant(df['title'].to_numpy(), name='movie_title', dtype=tf.string)
         self.genres = tf.constant(df['genres'].to_numpy(), name='movie_genres', dtype=tf.string)
         self.num_movies = len(df)
@@ -45,7 +63,7 @@ class MovieData(object):
         if len(tf.shape(movie_id)) == 1:
             movie_id = tf.expand_dims(movie_id, 1)
             
-        idx = tf.subtract(movie_id, self.offset + 1) # the min_movie_id - offset is index 1 so subtract one more
+        idx = tf.subtract(movie_id, self.offset)
         return {
             'movie_id': movie_id,
             'genres': tf.gather(self.genres, idx)

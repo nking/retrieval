@@ -2208,7 +2208,7 @@ class TestAnalysis(unittest.TestCase):
                 f"Candidates span multiple distinct semantic regions in the embedding space."
             )
             
-        TestAnalysis.summary_output_conclusions_dict["intra-list divserity"] = conclusions
+        TestAnalysis.summary_output_conclusions_dict["intra-list diversity"] = conclusions
         
         return {
             "ild_movie": round(model_ild, 6),
